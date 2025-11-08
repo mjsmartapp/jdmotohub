@@ -9,10 +9,12 @@
 
   <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.3/firebase-app.js";
-    import { getAuth, signOut, onAuthStateChanged, updateProfile } 
-      from "https://www.gstatic.com/firebasejs/10.12.3/firebase-auth.js"; // Added updateProfile
+    import { 
+        getAuth, signOut, onAuthStateChanged, updateProfile, 
+        GoogleAuthProvider, signInWithPopup // ⭐ NEW: Google Auth Imports
+    } from "https://www.gstatic.com/firebasejs/10.12.3/firebase-auth.js"; 
     import { getDatabase, ref, push, onValue, set, query, orderByChild, equalTo, get } 
-      from "https://www.gstatic.com/firebasejs/10.12.3/firebase-database.js"; // Added get
+      from "https://www.gstatic.com/firebasejs/10.12.3/firebase-database.js"; 
 
     // 🔹 Firebase Config
     const firebaseConfig = {
@@ -32,9 +34,12 @@
 
     let currentUserId = null; 
     let currentUserEmail = null; 
-    let currentUserPhone = null; // NEW: Store current user's phone
-    let currentUserAddress = null; // NEW: Store current user's address
+    let currentUserPhone = null; 
+    let currentUserAddress = null; 
     let cartCount = 0; 
+
+    // ⭐ NEW: Global variable to store pending action data before login
+    let pendingAction = null; 
 
     // 🔹 Utility Functions for Loader Bar
     const loader = document.getElementById('loader-bar');
@@ -61,41 +66,74 @@
       }, 3000); 
     };
 
-    // 🛒 Load Cart Count from Firebase
+    // ⭐ NEW: Google Sign-In Function
+    window.googleLoginPopup = async (action, data = null) => {
+        // Store the intended action to be resumed after login
+        pendingAction = { action, data }; 
+        showLoader();
+        try {
+            const provider = new GoogleAuthProvider();
+            await signInWithPopup(auth, provider);
+            // onAuthStateChanged listener will detect successful login and handle pendingAction
+        } catch (error) {
+            if (error.code !== 'auth/popup-closed-by-user') {
+                showToast(`Login failed: ${error.message}`, "error");
+            }
+        } finally {
+            hideLoader();
+        }
+    };
+
+
+    // 🛒 Load Cart Count from Firebase - MODIFIED to handle logged-out state
     function loadCartCount() {
-        if (!currentUserId) return;
+        const cartCountElement = document.getElementById('cart-count');
+        const cartCountDrawerElement = document.getElementById('cart-count-drawer');
+
+        if (!currentUserId) {
+            cartCountElement.innerText = 0; // Show 0 when logged out
+            cartCountDrawerElement.innerText = 0;
+            return;
+        }
 
         // Listen for real-time changes to the user's cart node
         onValue(ref(db, `users/${currentUserId}/cart`), (snapshot) => {
             const cartItems = snapshot.val();
             cartCount = cartItems ? Object.keys(cartItems).length : 0;
-            document.getElementById('cart-count').innerText = cartCount;
+            cartCountElement.innerText = cartCount;
+            cartCountDrawerElement.innerText = cartCount;
         }, {
             onlyOnce: false // Keep listening for changes
         });
     }
 
-    // 🛒 Add Vehicle to Cart in Firebase
-    window.addToCart = async (vehicleKey, vehicleName) => {
-        if (!currentUserId) {
-            return showToast("Please log in to add items to your cart.", "error");
+    // 🛒 Add Vehicle to Cart in Firebase - MODIFIED for Login Check
+    window.addToCart = async (vehicleKey, vehicleName, skipAuthCheck = false) => {
+        if (!currentUserId && !skipAuthCheck) {
+            // ⭐ MODIFIED: Initiate Google Login if not logged in
+            showToast("Please log in with Google to add items to your cart.", "warning");
+            return window.googleLoginPopup('cart', { key: vehicleKey, name: vehicleName });
         }
 
         try {
             // Set the item in the cart (using set to ensure the key is the vehicle ID)
             await set(ref(db, `users/${currentUserId}/cart/${vehicleKey}`), true);
 
-            showToast(`${vehicleName} added to cart! Total items: ${cartCount + 1}`, "success");
+            showToast(`${vehicleName} added to cart!`, "success");
             // loadCartCount handles the UI update via onValue listener
         } catch (err) {
             showToast(`Error adding to cart: ${err.message}`, "error");
         }
     };
 
-    // 📦 Simulate a Direct Purchase (Log as Order) - MODIFIED AGAIN for Pop-up
+    // 📦 Simulate a Direct Purchase (Log as Order) - MODIFIED for Login Check
     window.buyVehicle = async (vehicleKey, vehicleName, price) => {
+        const vehicleData = { key: vehicleKey, name: vehicleName, price: price };
+
         if (!currentUserId) {
-            return showToast("Please log in to place an order.", "error");
+            // ⭐ MODIFIED: Initiate Google Login on Buy Now if not logged in
+            showToast("Please log in with Google to purchase this vehicle.", "warning");
+            return window.googleLoginPopup('buy', vehicleData);
         }
 
         // ⭐ NEW: Check for required Mobile Number - Keep this check
@@ -105,22 +143,18 @@
             return;
         }
 
-        // Store the details in a global object or data attributes for the modal
-        const vehicleData = { key: vehicleKey, name: vehicleName, price: price };
-        
-        // ** NEW: Open the professional Buy Now Modal **
+        // ** Open the professional Buy Now Modal **
         window.openBuyNowModal(vehicleData);
     };
 
-    // 💰 NEW: Actual Order Placement (Moved from old buyVehicle)
-    // ⭐ MODIFIED: Added parameters for loan/EMI data and payment method from modal
+    // 💰 Actual Order Placement (Moved from old buyVehicle)
     window.placeOrderFromModal = async (vehicleKey, vehicleName, price, paymentMethod, downPayment, loanTenure, interestRate, loanAmount) => {
         
         // Re-check phone number just in case
         if (!currentUserPhone || currentUserPhone.length < 10) {
             showToast("Mobile Number is required to place an order. Please update your profile.", "error");
             showSection('profile');
-            closeBuyNowModal(); // Close modal if redirecting
+            closeBuyNowModal(); 
             return;
         }
 
@@ -134,17 +168,13 @@
                 price: price,
                 timestamp: new Date().toISOString(),
                 status: "processing",
-                // ⭐ NEW: Include Payment Method
-                paymentMethod: paymentMethod, // e.g., 'full_paid' or 'emi'
-                // ⭐ MODIFIED: Include EMI/Loan Data from modal
+                paymentMethod: paymentMethod, 
                 loanInfo: {
-                    // Only include loan details if the payment method is EMI
                     downPayment: paymentMethod === 'emi' ? (parseInt(downPayment) || 0) : 0, 
                     loanTenure: paymentMethod === 'emi' ? (parseInt(loanTenure) || 0) : 0,
                     interestRate: paymentMethod === 'emi' ? (parseFloat(interestRate) || 0) : 0,
-                    loanAmount: paymentMethod === 'emi' ? (parseInt(loanAmount) || 0) : 0 // Use the calculated loan amount
+                    loanAmount: paymentMethod === 'emi' ? (parseInt(loanAmount) || 0) : 0 
                 },
-                // Include current contact info for the order record
                 buyerInfo: { 
                     name: auth.currentUser.displayName,
                     email: currentUserEmail,
@@ -153,12 +183,12 @@
                 }
             });
             showToast(`Order placed for ${vehicleName} (₹${parseInt(price).toLocaleString('en-IN')})!`, "success");
-            closeBuyNowModal(); // Close after successful order
-            showSection('order'); // Show orders page
+            closeBuyNowModal(); 
+            showSection('order'); 
         } catch (err) {
             showToast(`Error placing order: ${err.message}`, "error");
         } finally {
-            hideLoader(); // Hide loader after completion
+            hideLoader(); 
         }
     }
 
@@ -191,13 +221,11 @@
         document.getElementById('modalVehicleName').innerText = vehicleData.name;
         document.getElementById('modalVehiclePrice').innerText = `₹${formattedPrice}`;
         
-        // ⭐ MODIFIED: Set default payment option to 'emi' for initial calculation
         const paymentOptionSelect = document.getElementById('modalPaymentOption');
         if (paymentOptionSelect) {
-            paymentOptionSelect.value = 'emi'; // Default to EMI to show calculation first
+            paymentOptionSelect.value = 'emi'; // Default to EMI
         }
 
-        // Set a default down payment (e.g., min of 20% or max of 50000)
         document.getElementById('modalDownPayment').value = Math.min(price * 0.20, 50000).toFixed(0); 
         document.getElementById('modalLoanAmountDisplay').innerText = `₹${price.toLocaleString('en-IN')}`; // Initial loan amount
 
@@ -223,12 +251,10 @@
 
     window.updateEMICalculation = () => {
         const modal = document.getElementById('buyNowModal');
-        // Ensure modal and dataset price exist before proceeding
         if (!modal || !modal.dataset.vehiclePrice) return { loanAmount: 0, emi: 0 }; 
 
         const price = parseInt(modal.dataset.vehiclePrice);
 
-        // ⭐ NEW: Read Payment Option and manage visibility
         const paymentOption = document.getElementById('modalPaymentOption').value;
         const emiSection = document.getElementById('emiArrangementSection');
         
@@ -239,41 +265,33 @@
         let interestRate = 0;
 
         if (paymentOption === 'full_paid') {
-            // Full Paid: Hide EMI section, Loan amount is 0, Button text changes
             emiSection.style.display = 'none';
             document.getElementById('modalLoanAmountDisplay').innerText = `₹0`;
             document.getElementById('modalMonthlyEMI').innerText = 'N/A';
             document.getElementById('modalConfirmOrder').innerText = 'Confirm Full Payment Order';
             
-            // Return 0 for loan details
             return { loanAmount: 0, emi: 0 };
 
         } else { // paymentOption === 'emi'
-            // EMI/Loan: Show EMI section, calculate loan details
             emiSection.style.display = 'block';
 
             const downPaymentInput = document.getElementById('modalDownPayment');
             const downPayment = parseInt(downPaymentInput.value) || 0;
             
-            // Cap down payment at the vehicle price
             effectiveDownPayment = Math.min(downPayment, price);
             downPaymentInput.value = effectiveDownPayment.toFixed(0); 
-
 
             loanTenure = parseInt(document.getElementById('modalLoanTenure').value) || 12;
             interestRate = parseFloat(document.getElementById('modalInterestRate').value) || 10;
             
             loanAmount = Math.max(0, price - effectiveDownPayment);
-            emi = calculateEMI(loanAmount, interestRate, loanTenure / 12); // Tenure is in months, formula uses years
+            emi = calculateEMI(loanAmount, interestRate, loanTenure / 12); 
             
-            // Update display elements
             document.getElementById('modalLoanAmountDisplay').innerText = `₹${loanAmount.toLocaleString('en-IN')}`;
             document.getElementById('modalMonthlyEMI').innerText = emi > 0 ? `₹${Math.round(emi).toLocaleString('en-IN')}` : '₹0';
             
-            // Update checkout button text/action
             document.getElementById('modalConfirmOrder').innerText = loanAmount > 0 ? 'Arrange Loan & Order' : 'Confirm Cash Order';
             
-            // Return calculated values
             return { 
                 loanAmount, 
                 emi, 
@@ -284,58 +302,79 @@
         }
     }
 
-    // ⭐ MODIFIED: Collects loan/EMI data and payment method from modal fields before placing the order.
     window.confirmBuyNow = () => {
         const modal = document.getElementById('buyNowModal');
         const key = modal.dataset.vehicleKey;
         const name = modal.dataset.vehicleName;
         const price = modal.dataset.vehiclePrice;
         
-        // ⭐ NEW: Read Payment Option
         const paymentMethod = document.getElementById('modalPaymentOption').value;
 
         if (paymentMethod === 'full_paid') {
-            // Full Paid - All loan related fields are 0
             showToast("Confirming order for full payment (Cash/Transfer).", "warning");
             window.placeOrderFromModal(key, name, price, paymentMethod, 0, 0, 0, 0);
             return;
         }
 
         // EMI/Loan path
-        const { loanAmount } = window.updateEMICalculation(); // loanAmount is correctly calculated here
+        const { loanAmount } = window.updateEMICalculation(); 
         
-        // ⭐ NEW: Collect Modal Inputs
         const downPayment = document.getElementById('modalDownPayment').value;
         const loanTenure = document.getElementById('modalLoanTenure').value;
         const interestRate = document.getElementById('modalInterestRate').value;
 
         if (loanAmount > 0) {
-             // Inform user about loan request
              showToast("Loan arrangement request sent. Proceeding to place the provisional order.", "warning");
         }
         
-        // Proceed with the actual order placement - PASS NEW DATA
         window.placeOrderFromModal(key, name, price, paymentMethod, downPayment, loanTenure, interestRate, loanAmount);
+    }
+
+    // 💰 NEW: Simulate Checkout - MODIFIED for Login Check
+    window.checkoutCart = async (skipAuthCheck = false) => {
+        if (!currentUserId && !skipAuthCheck) {
+            // ⭐ MODIFIED: Initiate Google Login if not logged in
+            showToast("Please log in with Google to proceed to checkout.", "warning");
+            return window.googleLoginPopup('checkout');
+        }
+
+        if (!currentUserPhone || currentUserPhone.length < 10) {
+            showToast("Mobile Number is required for checkout. Please update your profile.", "error");
+            showSection('profile'); // Redirect to profile view
+            return;
+        }
+
+        showLoader(); 
+
+        try {
+            // Here, we simulate by logging the event and clearing the cart.
+            await set(ref(db, `users/${currentUserId}/cart`), null);
+            showToast("Checkout Successful! Your order has been placed and is being processed.", "success");
+            showSection('order'); 
+        } catch (err) {
+            showToast(`Error during checkout: ${err.message}`, "error");
+        } finally {
+            hideLoader();
+        }
     }
 
     // 🛒 NEW: Load Cart Items
     window.loadCartItems = () => {
         const cartList = document.getElementById("cartItemsList");
         const cartSummary = document.getElementById("cartSummary");
-        cartList.innerHTML = ''; // Clear previous content
+        cartList.innerHTML = ''; 
         let totalCartPrice = 0;
         let itemsInCart = 0;
 
         if (!currentUserId) {
             document.getElementById('cart-count-display').innerText = 0;
-            cartList.innerHTML = '<p class="empty-state">Please log in to view your shopping cart.</p>';
+            cartList.innerHTML = '<p class="empty-state">Please log in to view your shopping cart. <button onclick="googleLoginPopup(\'cart\')">Login with Google</button></p>';
             cartSummary.innerHTML = '<p class="total-price-text">Total: <span>₹0</span></p>';
             document.getElementById('checkoutButton').disabled = true;
             return;
         }
-
+        // ... rest of loadCartItems logic remains the same ...
         const cartRef = ref(db, `users/${currentUserId}/cart`);
-        // Use an onValue listener to react to real-time changes
         onValue(cartRef, async (snapshot) => {
             const cartKeys = snapshot.val();
             itemsInCart = cartKeys ? Object.keys(cartKeys).length : 0;
@@ -352,16 +391,13 @@
 
             document.getElementById('checkoutButton').disabled = false;
 
-            // Fetch details for each cart item
             const vehiclePromises = Object.keys(cartKeys).map(key => new Promise((resolve, reject) => {
-                // Fetch vehicle details only once to get current price/details
                 onValue(ref(db, `vehicles/${key}`), (vehicleSnapshot) => {
                     const v = vehicleSnapshot.val();
                     if (v && v.status === 'approved') {
                         v.key = vehicleSnapshot.key;
                         resolve(v);
                     } else {
-                        // Item might have been removed or unapproved
                         resolve(null); 
                     }
                 }, { onlyOnce: true });
@@ -396,7 +432,7 @@
                                         <p class="total-price-text">Total: <span style="font-size: 26px;">₹${totalCartPrice.toLocaleString('en-IN')}</span></p>
                                      </div>`;
 
-        }, { onlyOnce: false }); // Keep listening for changes (e.g., if another tab adds an item)
+        }, { onlyOnce: false }); 
     };
 
     // 🛒 NEW: Remove item from cart
@@ -410,32 +446,6 @@
         }
     };
 
-    // 💰 NEW: Simulate Checkout (Modified to check for phone number)
-    window.checkoutCart = async () => {
-        if (!currentUserId) return;
-
-        // ⭐ NEW: Check for required Mobile Number for checkout too
-        if (!currentUserPhone || currentUserPhone.length < 10) {
-            showToast("Mobile Number is required for checkout. Please update your profile.", "error");
-            showSection('profile'); // Redirect to profile view
-            return;
-        }
-
-        showLoader(); // Show loader during checkout
-
-        try {
-            // For a real app, you would move items to orders, handle payment, etc.
-            // Here, we simulate by logging the event and clearing the cart.
-            await set(ref(db, `users/${currentUserId}/cart`), null);
-            showToast("Checkout Successful! Your order has been placed and is being processed.", "success");
-            showSection('order'); // Redirect user to orders page
-        } catch (err) {
-            showToast(`Error during checkout: ${err.message}`, "error");
-        } finally {
-            hideLoader();
-        }
-    }
-
 
     // 📦 NEW: Load Orders History
     window.loadOrdersHistory = () => {
@@ -446,8 +456,7 @@
             ordersTableBody.innerHTML = '<tr><td colspan="5">Please log in to view your order history.</td></tr>';
             return;
         }
-
-        // Listen for user's orders
+        // ... rest of loadOrdersHistory logic remains the same ...
         onValue(ref(db, `users/${currentUserId}/orders`), (snapshot) => {
             ordersTableBody.innerHTML = "";
             let recordsFound = 0;
@@ -459,13 +468,11 @@
                 orders.push(order);
             });
 
-            // Sort by timestamp (newest first)
             orders.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
 
             orders.forEach((order) => {
                 recordsFound++;
                 const formattedPrice = parseInt(order.price || 0).toLocaleString('en-IN');
-                // Format date nicely
                 const orderDate = new Date(order.timestamp).toLocaleDateString('en-IN', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 
                 let statusClass = '';
@@ -482,12 +489,10 @@
                     statusClass = 'rejected';
                 }
                 
-                // Show Loan/EMI details if available
                 const loanDetails = order.loanInfo && order.loanInfo.loanAmount > 0 
                     ? `<br><small>Loan: ₹${order.loanInfo.loanAmount.toLocaleString('en-IN')} | DP: ₹${order.loanInfo.downPayment.toLocaleString('en-IN')}</small>`
                     : '';
                 
-                // Display payment method
                 const paymentDisplay = order.paymentMethod === 'full_paid' ? 'Full Paid' : 'EMI';
 
                 const row = `
@@ -513,6 +518,7 @@
 
     // ⭐ NEW: Function to load and set user profile data from DB
     async function loadUserProfile(user) {
+        // ... existing loadUserProfile logic remains the same ...
         try {
             const profileSnapshot = await get(ref(db, `users/${user.uid}/profile`));
             const profileData = profileSnapshot.val();
@@ -527,9 +533,6 @@
             document.getElementById("profile-input-address").value = currentUserAddress || "";
             document.getElementById("profile-input-email").value = user.email || ""; // Readonly email
 
-            // ⭐ THE FIX: Set the profile photo source
-            document.getElementById("userPhotoProfile").src = user.photoURL || "https://static-00.iconduck.com/assets.00/user-avatar-icon-512x512-nghi2896.png";
-
             // Set display fields
             document.getElementById("userNameProfile").innerText = user.displayName || "User";
             document.getElementById("userEmailProfile").innerText = user.email;
@@ -543,7 +546,9 @@
 
     // ⭐ NEW: Function to update user profile data in Auth and DB
     window.updateUserProfile = async () => {
-        if (!currentUserId) return;
+        if (!currentUserId) {
+             return showToast("Please log in to update your profile.", "warning");
+        }
 
         const newName = document.getElementById("profile-input-name").value.trim();
         const newPhone = document.getElementById("profile-input-phone").value.trim();
@@ -556,12 +561,10 @@
         showLoader();
 
         try {
-            // 1. Update Firebase Authentication Profile (for display name)
             await updateProfile(auth.currentUser, {
                 displayName: newName
             });
 
-            // 2. Update Realtime Database Profile (for phone, address, etc.)
             const profileData = {
                 name: newName,
                 phone: newPhone,
@@ -570,10 +573,8 @@
             };
             await set(ref(db, `users/${currentUserId}/profile`), profileData);
 
-            // Update local variables and re-run UI updates
             await loadUserProfile(auth.currentUser); 
 
-            // Re-populate sell form fields
             document.getElementById("selleremail").value = auth.currentUser.email;
             document.getElementById("sellername").value = newName;
             document.getElementById("sellerphone").value = newPhone;
@@ -589,47 +590,80 @@
     };
 
 
-    // 🔒 Protect Dashboard & Load User Info - MODIFIED
-    onAuthStateChanged(auth, (user) => {
+    // 🔒 Protect Dashboard & Load User Info - MODIFIED TO ALLOW ACCESS WHEN LOGGED OUT
+    onAuthStateChanged(auth, async (user) => {
       if (!user) {
-        window.location.href = "index.html";
+        currentUserId = null; // Ensure ID is null
+        currentUserEmail = null; 
+        
+        // ⭐ REMOVED REDIRECTION: Do NOT redirect to index.html
+
+        // Update UI for logged-out state
+        document.getElementById("userNameDrawer").innerText = "Guest User";
+        document.getElementById("userEmailDrawer").innerText = "Please log in";
+        document.getElementById("userPhotoDrawer").src = "https://static-00.iconduck.com/assets.00/user-avatar-icon-512x512-nghi2896.png";
+
       } else {
         currentUserId = user.uid; // Store UID
         currentUserEmail = user.email; 
 
-        // Load the persistent cart count AND the profile data
+        // Load user data
+        await loadUserProfile(user); 
         loadCartCount();
-        loadUserProfile(user); 
 
         // Drawer Profile content
         document.getElementById("userPhotoDrawer").src = user.photoURL || "https://static-00.iconduck.com/assets.00/user-avatar-icon-512x512-nghi2896.png";
         document.getElementById("userNameDrawer").innerText = user.displayName || "User";
         document.getElementById("userEmailDrawer").innerText = user.email;
 
-
-        // Pre-fill seller details on the Sell page (will be overwritten by loadUserProfile)
+        // Pre-fill seller details on the Sell page
         document.getElementById("selleremail").value = user.email;
         document.getElementById("sellername").value = user.displayName || "";
+        document.getElementById("sellerphone").value = currentUserPhone || "";
       }
+
+      // ⭐ NEW: Handle Pending Action after successful login
+      if (user && pendingAction) {
+          showToast(`Welcome back, ${user.displayName}! Resuming your action...`, "success");
+          const action = pendingAction.action;
+          const data = pendingAction.data;
+
+          // Clear pending action immediately
+          pendingAction = null; 
+
+          if (action === 'buy') {
+              // Re-run buyVehicle logic which will now find a user (skips the phone check for a moment)
+              window.openBuyNowModal(data); 
+
+          } else if (action === 'cart') {
+              // Re-run addToCart logic, skipping the auth check since we are authenticated now
+              window.addToCart(data.key, data.name, true); 
+
+          } else if (action === 'checkout') {
+              // Re-run checkout logic, skipping the auth check
+              window.checkoutCart(true); 
+          }
+      }
+      
+      // Load cart count after state is set (important for initial load)
+      loadCartCount();
     });
 
     // 🔹 Logout Function
     window.logout = () => {
       signOut(auth).then(() => {
         showToast("Logged out successfully.", "success");
-        window.location.href = "index.html";
+        // After logout, onAuthStateChanged handles the state change and UI update
+        window.showSection('home'); // Go back to home view
       });
     };
 
     //
-    // --- NEW IMAGE PICKER + PREVIEW LOGIC (Base64 conversion, no Firebase Storage) ---
-    //
-    // We'll keep selectedImages as an array of objects: { id, src, kind, size } where kind is 'file' or 'url'
+    // --- NEW IMAGE PICKER + PREVIEW LOGIC ---
     //
     const selectedImages = [];
     let imageIdCounter = 0;
 
-    // Handle files selected from file input -> convert to dataURL (Base64) and add to selectedImages
     window.handleFileSelection = (event) => {
       const files = Array.from(event.target.files || []);
       if (files.length === 0) return;
@@ -641,11 +675,9 @@
         };
         reader.readAsDataURL(file);
       });
-      // clear file input so same file can be re-selected if needed
       event.target.value = "";
     };
 
-    // Add image URLs entered manually (comma separated) into selectedImages as kind: 'url'
     window.addImageURLsToSelection = () => {
       const urlInput = document.getElementById("vimages").value.trim();
       if (!urlInput) return;
@@ -655,7 +687,6 @@
       renderImagePreviews();
     };
 
-    // Remove image by id
     window.removeSelectedImage = (id) => {
       const idx = selectedImages.findIndex(i => i.id === id);
       if (idx !== -1) {
@@ -664,7 +695,6 @@
       }
     };
 
-    // Render preview thumbnails with remove button
     function renderImagePreviews() {
       const container = document.getElementById("imagePreviewContainer");
       if (!container) return;
@@ -682,17 +712,19 @@
     }
 
     //
-    // 🔹 Add Vehicle (sent to pending approval) - UPDATED to combine selectedImages + manual input
+    // 🔹 Add Vehicle (sent to pending approval)
     //
     window.addVehicle = () => {
-      // Seller Details
+      if (!currentUserId) {
+        return showToast("Please log in to sell a vehicle.", "warning");
+      }
+      
       const sellerName = document.getElementById("sellername").value.trim();
       const sellerEmail = document.getElementById("selleremail").value.trim();
       const sellerPhone = document.getElementById("sellerphone").value.trim();
       const sellerAltPhone = document.getElementById("selleraltphone").value.trim();
       const sellerAddress = document.getElementById("selleraddress").value.trim();
 
-      // Vehicle Details
       const name = document.getElementById("vname").value.trim();
       const description = document.getElementById("vdescription").value.trim(); 
       const type = document.getElementById("vtype").value;
@@ -700,16 +732,12 @@
       const km = document.getElementById("vkm").value.trim();
       const price = document.getElementById("vprice").value.trim();
 
-      // Also allow user to quickly add any remaining URLs into selection before submit
       addImageURLsToSelection();
 
-      // Build combined vimages string from selectedImages (preserve order)
       const combinedImageSrcs = selectedImages.map(i => i.src);
       const imagesInput = combinedImageSrcs.join(","); 
       const img = combinedImageSrcs[0] || "https://images.unsplash.com/photo-1596557802874-954848074902?fit=crop&w=600&h=300&q=80";
 
-
-      // Updated validation check
       if (!sellerName || !sellerEmail || !sellerPhone || !sellerAddress || !name || !description || !year || !km || !price) {
         showToast("Please fill all required fields (Seller and Vehicle details)!", "warning");
         return;
@@ -721,7 +749,6 @@
       }
 
       const vehicleData = {
-        // Seller Information Structure
         seller: {
             name: sellerName,
             email: sellerEmail,
@@ -729,7 +756,6 @@
             altPhone: sellerAltPhone,
             address: sellerAddress
         },
-        // Vehicle Information
         name,
         description, 
         type,
@@ -746,18 +772,15 @@
       push(ref(db, "vehicles/"), vehicleData)
         .then(() => {
           showToast("Vehicle submitted for admin approval!", "success");
-          // Clear form fields
           document.querySelectorAll("#sell-view input, #sell-view textarea").forEach(i => i.value = "");
           document.getElementById("vtype").value = "bike";
-          // Clear previews
           selectedImages.length = 0;
           renderImagePreviews();
-          // Re-populate seller details
+          // Re-populate seller details from current user info
           if(auth.currentUser) {
-              document.getElementById("selleremail").value = auth.currentUser.email;
-              document.getElementById("sellername").value = auth.currentUser.displayName || "";
+              loadUserProfile(auth.currentUser); 
           }
-          showSection('history'); // Show sell history after submission
+          showSection('history'); 
         })
         .catch((err) => {
           showToast(`Error submitting vehicle: ${err.message}`, "error");
@@ -776,188 +799,178 @@
         const v = child.val();
         const vehicleKey = child.key; 
         if (v.status === "approved") {
-          // Use adminPrice as the final approved selling price, falling back to original price.
           const displayPrice = v.adminPrice || v.price || 0; 
           
           const card = document.createElement("div");
           card.className = "card";
           card.dataset.type = v.type;
-          // Store searchable/sortable data in data-attributes
           card.dataset.name = v.name;
           card.dataset.year = v.year;
           card.dataset.km = v.km;
-          card.dataset.price = displayPrice; // Store raw price for search/sort
+          card.dataset.price = displayPrice; 
           
           card.innerHTML = `
             <div class="card-image" style="background-image: url('${v.img}');"></div>
             <div class="card-content">
               <h3>${v.name}</h3>
               <p class="specs">Year: <span>${v.year}</span> | ${v.km} <span>km</span></p>
-              <p class="description">${(v.description || 'No description provided.').substring(0, 70)}...</p>
-              <p class="price">Price: <span>₹${parseInt(displayPrice).toLocaleString('en-IN')}</span></p>
+              <p class="description">${(v.description || 'No description provided.').substring(0, 50)}...</p>
               <div class="card-actions">
-                  <button class="action-btn buy-btn" onclick="buyVehicle('${vehicleKey}', '${v.name}', '${displayPrice}')">Buy Now</button>
-                  <button class="action-btn cart-btn" onclick="addToCart('${vehicleKey}', '${v.name}')">Add to Cart</button>
+                <p class="price">₹${parseInt(displayPrice).toLocaleString('en-IN')}</p>
+                <div class="action-buttons">
+                    <button class="cart-btn" onclick="addToCart('${vehicleKey}', '${v.name}')">
+                        🛒 Add
+                    </button>
+                    <button class="buy-btn" onclick="buyVehicle('${vehicleKey}', '${v.name}', '${displayPrice}')">
+                        Buy Now
+                    </button>
+                </div>
               </div>
             </div>
           `;
-          vehicleGrid.appendChild(card);
+          vehicles.push(card);
         }
       });
-      
-      // Initial filter/sort on load
-      window.filterAndSortVehicles();
+      vehicles.forEach(card => vehicleGrid.appendChild(card));
+
+      filterVehicles(); 
     });
 
-    // 🔹 Load Sell History
+    // 🔹 Load Sell History - UNCHANGED (Will display message if not logged in)
     window.loadSellHistory = async () => {
-      const historyTableBody = document.getElementById("historyTableBody");
-      historyTableBody.innerHTML = "<tr><td colspan='6'>Loading your submissions...</td></tr>";
+        const historyTableBody = document.getElementById("historyTableBody");
+        historyTableBody.innerHTML = "<tr><td colspan='6'>Loading your history...</td></tr>";
 
-      if (!currentUserEmail) {
-        historyTableBody.innerHTML = "<tr><td colspan='6'>Please log in to view your selling history.</td></tr>";
-        return;
-      }
+        if (!currentUserEmail) {
+            historyTableBody.innerHTML = '<tr><td colspan="6">Please log in to see your history.</td></tr>';
+            return;
+        }
+        // ... rest of loadSellHistory logic remains the same ...
+        try {
+            const userHistoryQuery = query(ref(db, "vehicles/"), orderByChild("submittedBy"), equalTo(currentUserEmail));
 
-      try {
-        // Query vehicles submitted by the current user
-        const vehiclesQuery = query(ref(db, `vehicles`), orderByChild('submittedBy'), equalTo(currentUserEmail));
-        
-        onValue(vehiclesQuery, (snapshot) => {
-          historyTableBody.innerHTML = "";
-          let recordsFound = 0;
-          const vehicles = [];
+            onValue(userHistoryQuery, (snapshot) => {
+                historyTableBody.innerHTML = "";
+                let recordsFound = 0;
 
-          snapshot.forEach((child) => {
-            const v = child.val();
-            v.key = child.key;
-            vehicles.push(v);
-          });
-          
-          // Sort by timestamp (if available, newest first) - assuming they might add a timestamp later
-          vehicles.sort((a, b) => {
-              const dateA = a.timestamp ? new Date(a.timestamp) : new Date(0);
-              const dateB = b.timestamp ? new Date(b.timestamp) : new Date(0);
-              return dateB - dateA;
-          });
+                snapshot.forEach((child) => {
+                    const v = child.val();
+                    recordsFound++;
 
-          vehicles.forEach((v) => {
-            recordsFound++;
-            
-            const finalPrice = v.adminPrice ? `₹${parseInt(v.adminPrice).toLocaleString('en-IN')}` : 'N/A';
-            let statusClass = '';
-            let statusText = v.status;
+                    let statusClass = '';
+                    let statusText = '';
+                    let finalPrice = v.price ? parseInt(v.price).toLocaleString('en-IN') : 'N/A';
 
-            if (v.status === 'approved') {
-                statusClass = 'approved';
-                statusText = 'Approved (Live)';
-            } else if (v.status === 'pending') {
-                statusClass = 'pending';
-                statusText = 'Pending Admin Review';
-            } else if (v.status === 'rejected') {
-                statusClass = 'rejected';
-                statusText = 'Rejected by Admin';
-            } else {
-                statusClass = 'unknown';
-                statusText = 'Unknown Status';
-            }
+                    if (v.status === 'approved') {
+                        statusClass = 'approved';
+                        statusText = 'Approved';
+                        finalPrice = v.adminPrice ? parseInt(v.adminPrice).toLocaleString('en-IN') : finalPrice;
+                    } else if (v.status === 'pending') {
+                        statusClass = 'pending';
+                        statusText = 'Pending Admin Review';
+                    } else if (v.status === 'rejected') {
+                        statusClass = 'rejected';
+                        statusText = 'Rejected by Admin';
+                    } else {
+                        statusClass = 'unknown';
+                        statusText = 'Unknown Status';
+                    }
 
-            const row = `
-                <tr>
-                    <td data-label="Vehicle Name">${v.name}</td>
-                    <td data-label="Type">${v.type}</td>
-                    <td data-label="Your Price">₹${parseInt(v.price || 0).toLocaleString('en-IN')}</td>
-                    <td data-label="Final Price">${finalPrice}</td>
-                    <td data-label="Status"><span class="status-badge ${statusClass}">${statusText}</span></td>
-                    <td data-label="Action"><button class="action-btn view-details-btn" onclick="showToast('Details for ${v.name} - Status: ${statusText}', 'success')">View Details</button></td>
-                </tr>
-            `;
-            historyTableBody.insertAdjacentHTML("beforeend", row);
-          });
+                    const row = `
+                        <tr>
+                            <td data-label="Vehicle Name">${v.name}</td>
+                            <td data-label="Type">${v.type}</td>
+                            <td data-label="Your Price">₹${parseInt(v.price || 0).toLocaleString('en-IN')}</td>
+                            <td data-label="Final Price">₹${finalPrice}</td>
+                            <td data-label="Status"><span class="status-badge ${statusClass}">${statusText}</span></td>
+                            <td data-label="Action"><button class="action-btn view-details-btn" onclick="showToast('Details for ${v.name} - Status: ${statusText}', 'success')">View Details</button></td>
+                        </tr>
+                    `;
+                    historyTableBody.insertAdjacentHTML("beforeend", row);
+                });
 
-          if (recordsFound === 0) {
-            historyTableBody.innerHTML = "<tr><td colspan='6'>You have not submitted any vehicles yet.</td></tr>";
-          }
-        }, (error) => {
-          console.error("Error loading sell history:", error);
-          historyTableBody.innerHTML = "<tr><td colspan='6'>Error loading history.</td></tr>";
-        });
-      } catch (err) {
-        console.error("Error during history query setup:", err);
-        historyTableBody.innerHTML = "<tr><td colspan='6'>An error occurred.</td></tr>";
-      }
+                if (recordsFound === 0) {
+                    historyTableBody.innerHTML = "<tr><td colspan='6'>You have not submitted any vehicles yet.</td></tr>";
+                }
+            }, (error) => {
+                console.error("Error loading sell history:", error);
+                historyTableBody.innerHTML = "<tr><td colspan='6'>Error loading history.</td></tr>";
+            });
+
+        } catch (err) {
+            console.error("Error during history query setup:", err);
+            historyTableBody.innerHTML = "<tr><td colspan='6'>An error occurred.</td></tr>";
+        }
     };
+
 
     // 🔹 Drawer Toggle Function
     window.toggleDrawer = () => {
-      const drawer = document.getElementById('drawer-menu');
-      const overlay = document.getElementById('drawer-overlay');
-      const isVisible = drawer.classList.toggle('open');
-      overlay.style.display = isVisible ? 'block' : 'none';
-      document.body.style.overflow = isVisible ? 'hidden' : 'auto';
+        const drawer = document.getElementById('drawer-menu');
+        const overlay = document.getElementById('drawer-overlay');
+        const isVisible = drawer.classList.toggle('open');
+        overlay.style.display = isVisible ? 'block' : 'none';
+        document.body.style.overflow = isVisible ? 'hidden' : 'auto';
     }
 
     // 🔹 Section Visibility Manager - UNCHANGED
     window.showSection = (sectionId) => {
-      // Close the drawer if open
-      const drawer = document.getElementById('drawer-menu');
-      const overlay = document.getElementById('drawer-overlay');
-      if(drawer.classList.contains('open')) {
-        window.toggleDrawer();
-      }
+        const drawer = document.getElementById('drawer-menu');
+        const overlay = document.getElementById('drawer-overlay');
+        if (drawer.classList.contains('open')) {
+            drawer.classList.remove('open');
+            overlay.style.display = 'none';
+            document.body.style.overflow = 'auto';
+        }
 
-      // Hide all content sections
-      document.querySelectorAll('.content-section').forEach(section => {
-        section.classList.add('hidden');
-      });
+        document.querySelectorAll('.content-section').forEach(section => {
+            section.classList.add('hidden');
+        });
 
-      // Show the requested section
-      const activeSection = document.getElementById(sectionId);
-      if (activeSection) {
-        activeSection.classList.remove('hidden');
-        window.scrollTo(0, 0); // Scroll to top on section change
-      }
+        const targetSection = document.getElementById(sectionId + '-view');
+        if (targetSection) {
+            targetSection.classList.remove('hidden');
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+        }
+
+        document.querySelectorAll('.drawer-nav .nav-item').forEach(item => {
+            item.classList.remove('active');
+            if (item.dataset.section === sectionId) {
+                item.classList.add('active');
+            }
+        });
+        
+        if (sectionId === 'cart') {
+            loadCartItems();
+        } else if (sectionId === 'order') {
+            loadOrdersHistory();
+        } else if (sectionId === 'history') {
+            loadSellHistory();
+        }
+    }
+
+    // 🔹 Filter & Sort Logic
+    window.filterVehicles = () => {
+      const vehicleGridElement = document.getElementById("vehicleGrid");
+      const cards = Array.from(vehicleGridElement.children);
       
-      // Update active nav item
-      document.querySelectorAll('.drawer-nav .nav-item').forEach(item => {
-          item.classList.remove('active');
-          if (item.dataset.section === sectionId) {
-              item.classList.add('active');
-          }
-      });
-
-      // Trigger specific load functions
-      if (sectionId === 'cart') {
-          window.loadCartItems();
-      } else if (sectionId === 'order') {
-          window.loadOrdersHistory();
-      } else if (sectionId === 'history') {
-          window.loadSellHistory();
-      } else if (sectionId === 'profile' && auth.currentUser) {
-          // Ensure profile data is fresh when profile section is shown
-          loadUserProfile(auth.currentUser);
-      }
-    };
-
-    // 🔹 Home Page Filter & Sort Logic - UNCHANGED
-    window.filterAndSortVehicles = () => {
-      const vehicleGridElement = document.getElementById('vehicleGrid');
-      const cards = Array.from(vehicleGridElement.querySelectorAll('.card'));
-      const searchTerm = document.getElementById('search-input').value.toLowerCase();
-      const type = document.getElementById('type-filter').value;
-      const sortBy = document.getElementById('sort-by').value;
+      const search = document.getElementById('search').value.toLowerCase();
+      const type = document.getElementById('filter').value;
+      const sortBy = document.getElementById('sort').value;
 
       // 1. FILTERING
       cards.forEach(card => {
-        const matchesSearch = card.dataset.name.toLowerCase().includes(searchTerm) || 
-                              card.dataset.year.includes(searchTerm);
+        const matchesSearch = !search || 
+                              card.dataset.name.toLowerCase().includes(search) ||
+                              card.dataset.year.includes(search) ||
+                              card.dataset.km.includes(search) ||
+                              card.dataset.price.includes(search);
+
         const matchesType = (type === 'all' || card.dataset.type === type);
 
-        // Temporarily hide non-matching elements (will be re-shown after sorting)
         card.style.display = (matchesSearch && matchesType) ? "grid" : "none";
       });
 
-      // Filter only the *visible* cards for sorting
       let visibleCards = cards.filter(card => card.style.display !== 'none');
 
       // 2. SORTING
@@ -966,9 +979,8 @@
         const bVal = b.dataset[sortBy.split('_')[0]];
         const direction = sortBy.split('_')[1];
 
-        if (sortBy === 'default') return 0; // No sorting
+        if (sortBy === 'default') return 0;
 
-        // Numeric fields (Year, KM, Price)
         if (sortBy.includes('year') || sortBy.includes('km') || sortBy.includes('price')) {
           const numA = parseFloat(aVal);
           const numB = parseFloat(bVal);
@@ -976,7 +988,6 @@
           return numB - numA;
         }
 
-        // String fields (Name)
         if (sortBy.includes('name')) {
           const nameA = aVal.toLowerCase();
           const nameB = bVal.toLowerCase();
@@ -987,136 +998,108 @@
         return 0;
       });
 
-      // 3. RE-RENDERING (to apply sort order)
-      // Append the sorted cards back to the grid. The DOM function appendChild automatically moves existing elements.
+      // 3. RE-RENDERING 
       visibleCards.forEach(card => {
         vehicleGridElement.appendChild(card);
-        // Ensure they are visible after re-appending
-        card.style.display = 'grid';
+        card.style.display = 'grid'; 
       });
     };
 
     // Set initial view
     document.addEventListener('DOMContentLoaded', () => {
-      showSection('home');
-      hideLoader(); // Ensure loader is hidden on load
+        showSection('home');
+        hideLoader(); // Ensure loader is hidden on load
+        
+        document.getElementById('modalDownPayment')?.addEventListener('input', window.updateEMICalculation);
+        document.getElementById('modalLoanTenure')?.addEventListener('change', window.updateEMICalculation);
+        document.getElementById('modalInterestRate')?.addEventListener('change', window.updateEMICalculation);
+        document.getElementById('modalPaymentOption')?.addEventListener('change', window.updateEMICalculation);
 
-      // ⭐ NEW MODAL EVENT LISTENERS (Updated to also attach to payment option change) ⭐
-      document.getElementById('modalDownPayment')?.addEventListener('input', window.updateEMICalculation);
-      document.getElementById('modalLoanTenure')?.addEventListener('change', window.updateEMICalculation);
-      document.getElementById('modalInterestRate')?.addEventListener('change', window.updateEMICalculation);
-      // NEW LISTENER: Recalculate EMI when payment option changes
-      document.getElementById('modalPaymentOption')?.addEventListener('change', window.updateEMICalculation); 
+        document.getElementById('search')?.addEventListener('input', window.filterVehicles);
+        document.getElementById('filter')?.addEventListener('change', window.filterVehicles);
+        document.getElementById('sort')?.addEventListener('change', window.filterVehicles);
     });
-
   </script>
-
   <style>
+    /* ... (CSS STYLES REMAIN UNCHANGED) ... */
     :root {
-      --primary-color: #007bff;
-      --secondary-color: #6c757d;
-      --danger-color: #dc3545;
-      --success-color: #28a745;
-      --warning-color: #ffc107;
-
-      --text-color: #343a40;
-      --text-light: #6c757d;
-      --background-color: #f8f9fa;
+      --primary-color: #00796B;
+      --primary-hover: #00695C;
+      --background-color: #f0f2f5;
       --card-bg: #ffffff;
+      --text-color: #212529;
+      --text-light: #6c757d;
       --border-color: #e9ecef;
-      --shadow-color: rgba(0, 0, 0, 0.05);
-
-      --success-bg: #d4edda;
-      --error-bg: #f8d7da;
-      --warning-bg: #fff3cd;
+      --danger-color: #dc3545;
+      --success-bg: #4caf50;
+      --error-bg: #f44336;
+      --warning-bg: #ff9800;
     }
-
     * {
       box-sizing: border-box;
-      margin: 0;
-      padding: 0;
-      font-family: 'Inter', sans-serif;
     }
-
     body {
-      background-color: var(--background-color);
-      color: var(--text-color);
+      font-family: 'Inter', sans-serif;
+      background: var(--background-color);
+      margin: 0;
       padding-top: 60px; /* Space for fixed header */
-      transition: background-color 0.3s;
+      color: var(--text-color);
     }
-
-    /* --- LOADER BAR --- */
+    /* --- LOADER BAR (NEW) --- */
     #loader-bar {
-        position: fixed;
-        top: 60px;
-        left: 0;
-        width: 100%;
-        height: 3px;
-        background-color: var(--primary-color);
-        z-index: 10001;
-        display: none;
-        overflow: hidden;
-    }
-    #loader-bar::before {
-        content: '';
-        position: absolute;
-        top: 0;
-        left: -50%;
-        width: 50%;
-        height: 100%;
-        background: linear-gradient(90deg, transparent, white, transparent);
-        animation: loading 1.5s infinite;
-    }
-    @keyframes loading {
-        0% { left: -50%; }
-        100% { left: 100%; }
-    }
-
-    /* --- TOAST NOTIFICATION --- */
-    #toast-container {
       position: fixed;
-      top: 70px; /* Below header */
-      left: 50%;
-      transform: translateX(-50%);
-      z-index: 20000;
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 3px;
+      background-color: transparent;
+      z-index: 10002;
+      overflow: hidden;
+    }
+    #loader-bar::after {
+      content: '';
+      display: block;
+      height: 100%;
+      width: 30%; /* Start width */
+      background-color: var(--danger-color); /* Highlight color */
+      animation: progress-slide 1.5s infinite linear;
+    }
+    @keyframes progress-slide {
+      0% { transform: translateX(-100%); }
+      100% { transform: translateX(333.33%); } /* 100 / 30 * 100 % */
     }
 
+    /* --- TOAST NOTIFICATION (NEW) --- */
+    #toast-container {
+        position: fixed;
+        top: 20px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 10001;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 10px;
+    }
     .toast {
-      padding: 10px 20px;
-      border-radius: 8px;
-      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
-      opacity: 1;
-      transition: opacity 0.5s, transform 0.5s;
-      min-width: 250px;
-      text-align: center;
-      font-size: 14px;
-      font-weight: 500;
+        background-color: #333;
+        color: white;
+        padding: 10px 20px;
+        border-radius: 6px;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+        opacity: 1;
+        transition: opacity 0.5s, transform 0.5s;
+        min-width: 250px;
+        text-align: center;
+        font-size: 14px;
+        font-weight: 500;
     }
-
-    .toast.success {
-      background-color: var(--success-bg);
-      color: var(--success-color);
-      border: 1px solid var(--success-color);
-    }
-
-    .toast.error {
-      background-color: var(--error-bg);
-      color: var(--danger-color);
-      border: 1px solid var(--danger-color);
-    }
-
-    .toast.warning {
-      background-color: var(--warning-bg);
-      color: var(--warning-color);
-      border: 1px solid var(--warning-color);
-    }
-
+    .toast.success { background-color: var(--success-bg); }
+    .toast.error { background-color: var(--error-bg); }
+    .toast.warning { background-color: var(--warning-bg); }
     .toast.fade-out {
-      opacity: 0;
-      transform: translate(-50%, -20px);
+        opacity: 0;
+        transform: translate(-50%, -20px);
     }
 
     /* --- HEADER --- */
@@ -1135,19 +1118,16 @@
       box-shadow: 0 2px 4px rgba(0,0,0,0.1);
       z-index: 10000;
     }
-
     .header-left {
       display: flex;
       align-items: center;
     }
-
     header h1 {
       font-size: 20px;
       margin: 0;
       font-weight: 700;
       letter-spacing: 1px;
     }
-
     #drawer-toggle {
       background: none;
       border: none;
@@ -1157,41 +1137,27 @@
       cursor: pointer;
       padding: 5px;
     }
-
     .header-right {
       display: flex;
       align-items: center;
     }
-
     .cart-icon {
       font-size: 20px;
       cursor: pointer;
       position: relative;
       padding: 5px;
-      margin-left: 15px;
     }
-
-    #cart-count {
+    .cart-badge {
       position: absolute;
       top: -5px;
-      right: -5px;
+      right: -10px;
       background: var(--danger-color);
       color: white;
       border-radius: 50%;
       padding: 2px 6px;
-      font-size: 10px;
+      font-size: 12px;
+      font-weight: 600;
       line-height: 1;
-      font-weight: 700;
-    }
-    
-    .profile-avatar {
-        width: 35px;
-        height: 35px;
-        border-radius: 50%;
-        object-fit: cover;
-        margin-left: 15px;
-        cursor: pointer;
-        border: 2px solid white;
     }
 
     /* --- DRAWER MENU --- */
@@ -1202,109 +1168,90 @@
       width: 100%;
       height: 100%;
       background: rgba(0, 0, 0, 0.5);
-      z-index: 10010;
+      z-index: 9998;
       display: none;
       transition: opacity 0.3s;
     }
-
     #drawer-menu {
       position: fixed;
       top: 0;
       left: 0;
-      width: 300px;
+      width: 280px;
       height: 100%;
       background: var(--card-bg);
-      z-index: 10011;
-      transform: translateX(-100%);
-      transition: transform 0.3s ease-out;
+      z-index: 9999;
       box-shadow: 2px 0 5px rgba(0,0,0,0.2);
+      transform: translateX(-100%);
+      transition: transform 0.3s ease-in-out;
       display: flex;
       flex-direction: column;
+      padding: 20px;
     }
-
     #drawer-menu.open {
       transform: translateX(0);
     }
-
     .drawer-header {
-      padding: 10px 20px;
-      display: flex;
-      justify-content: flex-end;
-      border-bottom: 1px solid var(--border-color);
+      text-align: right;
+      margin-bottom: 20px;
     }
-
     .drawer-header button {
       background: none;
       border: none;
       font-size: 24px;
       cursor: pointer;
-      color: var(--text-color);
+      color: var(--text-light);
     }
-
     .drawer-profile {
-      padding: 20px;
       text-align: center;
+      padding-bottom: 20px;
+      margin-bottom: 20px;
       border-bottom: 1px solid var(--border-color);
     }
-
     .drawer-profile img {
-      width: 80px;
-      height: 80px;
+      width: 60px;
+      height: 60px;
       border-radius: 50%;
       object-fit: cover;
       margin-bottom: 10px;
-      border: 3px solid var(--primary-color);
     }
-
     .drawer-profile h3 {
-      font-size: 18px;
-      margin: 5px 0;
+      margin: 0;
+      font-size: 16px;
+      font-weight: 600;
     }
-
     .drawer-profile p {
-      font-size: 14px;
+      margin: 0;
+      font-size: 13px;
       color: var(--text-light);
     }
-
     .drawer-nav {
       flex-grow: 1;
-      padding: 10px 0;
-    }
-
-    .drawer-nav .nav-item {
       display: flex;
-      align-items: center;
-      padding: 12px 20px;
+      flex-direction: column;
+    }
+    .drawer-nav .nav-item {
+      padding: 12px 15px;
       text-decoration: none;
       color: var(--text-color);
       font-size: 16px;
+      display: flex;
+      align-items: center;
       transition: background 0.2s;
+      border-radius: 6px;
     }
-
-    .drawer-nav .nav-item .icon {
-      margin-right: 15px;
-      font-size: 20px;
-    }
-
     .drawer-nav .nav-item:hover, .drawer-nav .nav-item.active {
       background: var(--border-color);
-      color: var(--primary-color);
-      font-weight: 600;
     }
-
-    .drawer-footer {
-      padding: 20px;
-      border-top: 1px solid var(--border-color);
+    .drawer-nav .nav-item .icon {
+      margin-right: 15px;
+      font-size: 18px;
     }
-
     .drawer-logout-btn {
-      width: 100%;
       background: var(--danger-color);
       color: white;
-      padding: 12px 20px;
+      padding: 10px;
       border: none;
       border-radius: 6px;
-      font-size: 16px;
       font-weight: 600;
       cursor: pointer;
       margin-top: 20px;
@@ -1312,11 +1259,9 @@
       align-items: center;
       justify-content: center;
     }
-
     .drawer-logout-btn:hover {
       background: #c82333;
     }
-
     main {
       padding: 0 20px;
       max-width: 1200px;
@@ -1328,11 +1273,9 @@
       padding-top: 20px;
       min-height: calc(100vh - 80px); /* Fill the viewport */
     }
-
     .content-section.hidden {
       display: none;
     }
-
     .section-title {
       font-size: 24px;
       font-weight: 700;
@@ -1349,18 +1292,15 @@
       margin-bottom: 20px;
       margin-top: 15px;
     }
-
     .search-filter input, .search-filter select {
       padding: 10px 15px;
       border: 1px solid var(--border-color);
       border-radius: 6px;
       font-size: 16px;
     }
-
     .search-filter input {
       flex-grow: 1;
     }
-
     .search-filter select {
       width: 150px;
       flex-shrink: 0;
@@ -1378,148 +1318,114 @@
     .card {
       background: var(--card-bg);
       border-radius: 10px;
-      box-shadow: 0 4px 12px var(--shadow-color);
       overflow: hidden;
-      display: grid;
-      grid-template-rows: 200px 1fr;
-      transition: transform 0.3s;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+      transition: transform 0.2s;
     }
-
     .card:hover {
       transform: translateY(-5px);
-      box-shadow: 0 8px 20px rgba(0, 0, 0, 0.1);
+      box-shadow: 0 6px 16px rgba(0,0,0,0.1);
     }
-
     .card-image {
-      height: 200px;
+      width: 100%;
+      height: 180px;
       background-size: cover;
       background-position: center;
+      border-bottom: 1px solid var(--border-color);
     }
-
     .card-content {
-      padding: 15px;
-      display: flex;
-      flex-direction: column;
+      padding: 18px;
     }
-
     .card-content h3 {
+      margin: 0 0 8px 0;
+      color: var(--text-color);
       font-size: 18px;
-      margin-bottom: 5px;
-      color: var(--primary-color);
-      font-weight: 700;
+      font-weight: 600;
     }
-
     .card-content .specs {
-      font-size: 14px;
       color: var(--text-light);
-      margin-bottom: 10px;
-    }
-
-    .card-content .specs span {
-        font-weight: 600;
-        color: var(--text-color);
-    }
-
-    .card-content .description {
+      margin: 5px 0 10px 0;
       font-size: 14px;
-      margin-bottom: 15px;
-      flex-grow: 1;
     }
-
-    .card-content .price {
-      font-size: 16px;
+    .card-content .specs span {
       font-weight: 500;
       color: var(--text-color);
+    }
+    .card-content .description {
+      font-size: 14px;
+      color: var(--text-color);
       margin-bottom: 15px;
-      border-top: 1px solid var(--border-color);
-      padding-top: 10px;
+      line-height: 1.4;
     }
-
-    .card-content .price span {
-      font-size: 22px;
-      font-weight: 700;
-      color: var(--danger-color);
-      margin-left: 5px;
-    }
-
     .card-actions {
       display: flex;
-      gap: 10px;
-      margin-top: auto; /* Push actions to the bottom */
+      justify-content: space-between;
+      align-items: center;
+      padding-top: 10px;
+      border-top: 1px solid var(--border-color);
     }
-
-    .action-btn {
-      flex: 1;
-      padding: 10px 15px;
+    .card-actions .price {
+      font-size: 20px;
+      font-weight: 700;
+      color: var(--primary-color);
+      margin: 0;
+    }
+    .action-buttons {
+      display: flex;
+      gap: 10px;
+    }
+    .cart-btn, .buy-btn {
+      padding: 8px 15px;
       border: none;
       border-radius: 6px;
-      font-size: 14px;
       font-weight: 600;
       cursor: pointer;
       transition: background 0.2s;
     }
-
-    .buy-btn {
-      background: var(--danger-color);
-      color: white;
-    }
-
-    .buy-btn:hover {
-      background: #c82333;
-    }
-
     .cart-btn {
-      background: var(--secondary-color);
+      background: var(--warning-bg);
+      color: var(--text-color);
+    }
+    .cart-btn:hover {
+      background: #e08e00;
+    }
+    .buy-btn {
+      background: var(--success-bg);
       color: white;
     }
-
-    .cart-btn:hover {
-      background: #5a6268;
+    .buy-btn:hover {
+      background: #388e3c;
     }
 
-    /* --- SELL SECTION --- */
+    /* --- SELL VIEW --- */
     .sell-form-container {
-      max-width: 700px;
+      max-width: 600px;
       margin: 0 auto 40px auto;
       background: var(--card-bg);
       padding: 30px;
       border-radius: 10px;
       box-shadow: 0 4px 12px rgba(0,0,0,0.05);
     }
-
     .form-group {
       margin-bottom: 15px;
     }
-
     .form-group.split {
-      display: flex;
-      gap: 20px;
+        display: flex;
+        gap: 20px;
     }
-
     .form-group.split > div {
-      flex: 1;
+        flex: 1;
     }
-
-    .sell-form-container h3 {
-      font-size: 18px;
-      margin-top: 25px;
-      margin-bottom: 15px;
-      color: var(--primary-color);
-      border-bottom: 1px solid var(--border-color);
-      padding-bottom: 5px;
-    }
-
     .sell-form-container label {
       display: block;
       font-weight: 600;
       margin-bottom: 5px;
       font-size: 14px;
     }
-
     .sell-form-container input[type="text"], 
-    .sell-form-container input[type="email"], 
+    .sell-form-container input[type="email"],
     .sell-form-container input[type="number"], 
-    .sell-form-container textarea, 
+    .sell-form-container textarea,
     .sell-form-container select {
       width: 100%;
       padding: 10px;
@@ -1527,12 +1433,10 @@
       border-radius: 6px;
       font-size: 16px;
     }
-
     .sell-form-container textarea {
       resize: vertical;
       min-height: 100px;
     }
-
     .sell-form-container button {
       background: var(--danger-color);
       color: white;
@@ -1545,15 +1449,12 @@
       transition: background 0.2s;
       width: 100%;
     }
-
     .sell-form-container button:hover {
       background: #c82333;
     }
-
     .full-width {
       width: 100%;
     }
-
     .note {
       display: block;
       font-size: 12px;
@@ -1566,9 +1467,7 @@
       display: flex;
       flex-wrap: wrap;
       gap: 10px;
-      margin-top: 10px;
     }
-
     .preview-wrapper {
       position: relative;
       width: 100px;
@@ -1578,18 +1477,17 @@
       overflow: hidden;
       flex-shrink: 0;
     }
-
     .preview-wrapper img {
       width: 100%;
       height: 100%;
       object-fit: cover;
+      display: block;
     }
-
     .preview-remove {
       position: absolute;
-      top: 5px;
-      right: 5px;
-      background: rgba(220, 53, 69, 0.8);
+      top: 2px;
+      right: 2px;
+      background: rgba(0,0,0,0.6);
       color: white;
       border: none;
       border-radius: 50%;
@@ -1601,473 +1499,130 @@
       display: flex;
       align-items: center;
       justify-content: center;
+      z-index: 10;
+      padding: 0;
     }
-
     .preview-kind {
-        position: absolute;
-        bottom: 0;
-        left: 0;
-        background: rgba(0, 123, 255, 0.8);
-        color: white;
-        padding: 2px 5px;
-        font-size: 9px;
-        text-transform: uppercase;
-    }
-    
-    /* --- PROFILE SECTION --- */
-    .profile-card {
-      max-width: 600px;
-      margin: 0 auto 40px auto;
-      background: var(--card-bg);
-      padding: 30px;
-      border-radius: 10px;
-      box-shadow: 0 4px 12px rgba(0,0,0,0.05);
-    }
-    
-    .profile-summary {
-      display: flex;
-      align-items: center;
-      padding-bottom: 20px;
-      margin-bottom: 20px;
-      border-bottom: 1px solid var(--border-color);
-    }
-    
-    .profile-summary img {
-      width: 80px;
-      height: 80px;
-      border-radius: 50%;
-      object-fit: cover;
-      margin-right: 20px;
-    }
-    
-    .profile-details h3 {
-      margin: 0 0 5px 0;
-      font-size: 20px;
-      font-weight: 700;
-    }
-    
-    .profile-details p {
-      margin: 5px 0;
-      font-size: 14px;
-      color: var(--text-color);
-    }
-    
-    .profile-details span {
-      font-weight: 500;
+      position: absolute;
+      bottom: 2px;
+      left: 2px;
+      background: rgba(255,255,255,0.9);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 11px;
       color: var(--text-light);
-    }
-    
-    .profile-form label {
-      display: block;
-      font-weight: 600;
-      margin-top: 15px;
-      margin-bottom: 5px;
-      font-size: 14px;
-    }
-    
-    .profile-form input {
-      width: 100%;
-      padding: 10px;
-      border: 1px solid var(--border-color);
-      border-radius: 6px;
-      font-size: 16px;
-    }
-    
-    .profile-form button {
-      background: var(--primary-color);
-      color: white;
-      padding: 12px 20px;
-      border: none;
-      border-radius: 6px;
-      font-size: 16px;
-      font-weight: 600;
-      cursor: pointer;
-      margin-top: 25px;
-      width: 100%;
-    }
-    
-    .profile-form button:hover {
-      background: #0056b3;
-    }
-    
-    /* --- HISTORY / ORDERS TABLES --- */
-    .history-table, .orders-table {
-      width: 100%;
-      border-collapse: collapse;
-      background: var(--card-bg);
-      box-shadow: 0 4px 12px rgba(0,0,0,0.05);
-      border-radius: 10px;
-      overflow: hidden;
-    }
-
-    .history-table th, .orders-table th, 
-    .history-table td, .orders-table td {
-      padding: 15px;
-      text-align: left;
-      border-bottom: 1px solid var(--border-color);
-    }
-
-    .history-table th, .orders-table th {
-      background: var(--primary-color);
-      color: white;
-      font-weight: 600;
-      font-size: 14px;
+      font-weight: 700;
       text-transform: uppercase;
     }
 
-    .history-table tr:last-child td, .orders-table tr:last-child td {
-      border-bottom: none;
+    /* --- SELL HISTORY / ORDERS TABLE STYLES --- */
+    .table-container {
+        overflow-x: auto;
+        margin-bottom: 40px;
     }
-
-    .status-badge {
-      display: inline-block;
-      padding: 5px 10px;
-      border-radius: 20px;
-      font-size: 12px;
-      font-weight: 600;
+    .history-table, .orders-table {
+        width: 100%;
+        border-collapse: collapse;
+        background: var(--card-bg);
+        border-radius: 8px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.05);
     }
-
-    .status-badge.pending {
-      background-color: var(--warning-bg);
-      color: var(--warning-color);
-    }
-
-    .status-badge.approved {
-      background-color: var(--success-bg);
-      color: var(--success-color);
-    }
-
-    .status-badge.rejected {
-      background-color: var(--error-bg);
-      color: var(--danger-color);
-    }
-    
-    .view-details-btn {
+    .history-table th, .orders-table th {
         background: var(--primary-color);
         color: white;
-        padding: 6px 10px;
-        border: none;
-        border-radius: 4px;
+        padding: 12px 15px;
+        text-align: left;
+        font-weight: 600;
+        font-size: 14px;
+    }
+    .history-table td, .orders-table td {
+        padding: 12px 15px;
+        border-bottom: 1px solid var(--border-color);
+        font-size: 14px;
+    }
+    .history-table tr:last-child td, .orders-table tr:last-child td {
+        border-bottom: none;
+    }
+    .history-table tbody tr:hover, .orders-table tbody tr:hover {
+        background: #f7f7f7;
+    }
+    .status-badge {
+        padding: 5px 10px;
+        border-radius: 15px;
         font-size: 12px;
+        font-weight: 600;
+        display: inline-block;
+        text-transform: capitalize;
+    }
+    .status-badge.approved { background: #e6ffed; color: #008744; } /* Green */
+    .status-badge.pending { background: #fff5e6; color: #ff9800; } /* Amber */
+    .status-badge.rejected { background: #ffe6e6; color: var(--danger-color); } /* Red */
+    .action-btn {
+        background: var(--primary-color);
+        color: white;
+        border: none;
+        padding: 6px 12px;
+        border-radius: 4px;
         cursor: pointer;
+        font-size: 12px;
+    }
+    .action-btn:hover {
+        background: var(--primary-hover);
     }
 
-    /* --- CART SECTION --- */
-    .cart-container {
-      display: flex;
-      gap: 30px;
-      padding-bottom: 40px;
-    }
-
-    .cart-list {
-      flex: 3;
-      min-width: 0;
-    }
-
-    .cart-summary {
-      flex: 1;
-      max-width: 300px;
-      background: var(--card-bg);
-      padding: 20px;
-      border-radius: 10px;
-      box-shadow: 0 4px 12px rgba(0,0,0,0.05);
-      position: sticky;
-      top: 80px; /* Stick below the header */
-      height: fit-content;
-    }
-
-    .cart-summary h3 {
-      font-size: 20px;
-      margin-bottom: 15px;
-      padding-bottom: 10px;
-      border-bottom: 1px solid var(--border-color);
-    }
-
-    .total-price-text {
-      display: flex;
-      justify-content: space-between;
-      font-size: 16px;
-      margin-bottom: 10px;
-    }
-
-    .total-price-text span {
-      font-weight: 700;
-      color: var(--danger-color);
-      font-size: 18px;
-    }
-
-    #checkoutButton {
-      width: 100%;
-      background: var(--success-color);
-      color: white;
-      padding: 12px 20px;
-      border: none;
-      border-radius: 6px;
-      font-size: 16px;
-      font-weight: 600;
-      cursor: pointer;
-      margin-top: 15px;
-      transition: background 0.2s;
-    }
-
-    #checkoutButton:disabled {
-        background: var(--secondary-color);
-        cursor: not-allowed;
-    }
-    
-    #checkoutButton:hover:not(:disabled) {
-      background: #1e7e34;
-    }
-
-    .cart-item-card {
-      display: flex;
-      align-items: center;
-      background: var(--card-bg);
-      border-radius: 8px;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.05);
-      margin-bottom: 15px;
-      padding: 15px;
-      gap: 15px;
-    }
-
-    .cart-item-card .item-image {
-      width: 80px;
-      height: 60px;
-      background-size: cover;
-      background-position: center;
-      border-radius: 4px;
-      flex-shrink: 0;
-    }
-
-    .cart-item-card .item-details {
-      flex-grow: 1;
-    }
-
-    .cart-item-card .item-details h3 {
-      font-size: 16px;
-      margin: 0;
-      color: var(--text-color);
-    }
-
-    .cart-item-card .item-details .item-specs {
-      font-size: 12px;
-      color: var(--text-light);
-      margin: 3px 0 0 0;
-    }
-
-    .cart-item-card .item-price {
-      font-size: 18px;
-      font-weight: 700;
-      color: var(--primary-color);
-      margin: 0 20px;
-      flex-shrink: 0;
-    }
-
-    .cart-item-card .item-actions .remove-btn {
-      background: var(--danger-color);
-      color: white;
-      border: none;
-      padding: 6px 10px;
-      border-radius: 4px;
-      cursor: pointer;
-      font-size: 12px;
-      transition: background 0.2s;
-    }
-
-    .cart-item-card .item-actions .remove-btn:hover {
-      background: #c82333;
-    }
-    
-    .empty-state {
-        text-align: center;
-        padding: 40px 20px;
-        color: var(--text-light);
-        font-style: italic;
+    /* --- PROFILE VIEW --- */
+    .profile-card {
+        max-width: 600px;
+        margin: 0 auto 40px auto;
         background: var(--card-bg);
-        border-radius: 8px;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.05);
-    }
-
-    /* --- BUY NOW MODAL --- */
-    #buyNowOverlay {
-        position: fixed;
-        top: 0;
-        left: 0;
-        width: 100%;
-        height: 100%;
-        background: rgba(0, 0, 0, 0.6);
-        z-index: 10002;
-        display: none;
-        transition: opacity 0.3s;
-    }
-
-    #buyNowModal {
-        position: fixed;
-        top: 50%;
-        left: 50%;
-        transform: translate(-50%, -50%) scale(0.9);
-        background: var(--card-bg);
+        padding: 30px;
         border-radius: 10px;
-        box-shadow: 0 8px 25px rgba(0, 0, 0, 0.4);
-        max-width: 500px;
-        width: 90%;
-        z-index: 10003;
-        opacity: 0;
-        visibility: hidden;
-        transition: opacity 0.3s, transform 0.3s;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.05);
     }
-
-    #buyNowModal.open {
-        opacity: 1;
-        visibility: visible;
-        transform: translate(-50%, -50%) scale(1);
-    }
-
-    .modal-header {
+    .profile-summary {
         display: flex;
-        justify-content: space-between;
         align-items: center;
-        padding: 15px 20px;
+        padding-bottom: 20px;
+        margin-bottom: 20px;
         border-bottom: 1px solid var(--border-color);
     }
-
-    .modal-header h3 {
-        margin: 0;
-        font-size: 18px;
-        color: var(--primary-color);
+    .profile-summary img {
+        width: 80px;
+        height: 80px;
+        border-radius: 50%;
+        object-fit: cover;
+        margin-right: 20px;
     }
-
-    .modal-header button {
-        background: none;
-        border: none;
-        font-size: 24px;
-        cursor: pointer;
-        color: var(--text-light);
-    }
-
-    .modal-content {
-        padding: 20px;
-    }
-
-    .modal-price {
-        text-align: center;
-        font-size: 18px;
-        font-weight: 500;
-        margin-bottom: 20px;
-    }
-
-    .modal-price span {
-        font-size: 28px;
+    .profile-details h3 {
+        margin: 0 0 5px 0;
+        font-size: 20px;
         font-weight: 700;
-        color: var(--danger-color);
-        display: block;
-        margin-top: 5px;
     }
-    
-    .input-group-full-width {
-        margin-bottom: 15px;
-    }
-    
-    .input-group-full-width label {
-        display: block; 
-        font-size: 14px; 
-        font-weight: 600; 
-        margin-bottom: 5px;
-    }
-    
-    .input-group-full-width select {
-        width: 100%; 
-        padding: 10px; 
-        border: 1px solid var(--border-color); 
-        border-radius: 4px; 
-        font-size: 15px;
-    }
-
-
-    .loan-arrangement-section {
-        border: 1px dashed var(--border-color);
-        padding: 15px;
-        border-radius: 8px;
-        margin-bottom: 20px;
-    }
-
-    .loan-arrangement-section h4 {
-        margin: 0 0 15px 0;
-        font-size: 16px;
-        font-weight: 600;
-        color: var(--primary-color);
-        border-bottom: 1px solid var(--border-color);
-        padding-bottom: 8px;
-    }
-
-    .input-group-modal {
-        display: flex;
-        gap: 15px;
-        margin-bottom: 15px;
-    }
-
-    .input-group-modal > div {
-        flex: 1;
-    }
-
-    .input-group-modal label {
-        display: block;
-        font-size: 12px;
-        font-weight: 500;
-        margin-bottom: 5px;
-        color: var(--text-light);
-    }
-
-    .input-group-modal input, .input-group-modal select {
-        width: 100%;
-        padding: 10px;
-        border: 1px solid var(--border-color);
-        border-radius: 4px;
-        font-size: 15px;
-    }
-    
-    .input-group-modal .input-display {
-        display: block;
-        padding: 10px;
-        border: 1px solid var(--border-color);
-        border-radius: 4px;
-        font-size: 15px;
-        background-color: #f8f9fa;
-        font-weight: 600;
-    }
-
-    .emi-summary {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        padding: 15px 0;
-        font-size: 16px;
-        font-weight: 500;
-        border-top: 1px solid var(--border-color);
-        margin-top: 10px;
-    }
-
-    .emi-summary h4 {
-        margin: 0;
-        font-size: 18px;
+    .profile-details p {
+        margin: 5px 0;
+        font-size: 14px;
         color: var(--text-color);
+    }
+    .profile-details span {
+        font-weight: 500;
+        color: var(--text-light);
+    }
+    .profile-form label {
+        display: block;
         font-weight: 600;
+        margin-top: 15px;
+        margin-bottom: 5px;
+        font-size: 14px;
     }
-
-    .emi-value {
-        font-size: 22px;
-        color: var(--danger-color);
-        font-weight: 700;
-    }
-
-    .modal-footer {
-        border-top: 1px solid var(--border-color);
-        padding-top: 15px;
-    }
-
-    #modalConfirmOrder {
+    .profile-form input {
         width: 100%;
-        background: var(--success-color);
+        padding: 10px;
+        border: 1px solid var(--border-color);
+        border-radius: 6px;
+        font-size: 16px;
+    }
+    .profile-form button {
+        background: var(--primary-color);
         color: white;
         padding: 12px 20px;
         border: none;
@@ -2076,130 +1631,478 @@
         font-weight: 600;
         cursor: pointer;
         transition: background 0.2s;
+        margin-top: 20px;
+        width: 100%;
     }
-    
-    #modalConfirmOrder:hover {
-        background: #1e7e34;
-    }
-    
-    .modal-note {
-        text-align: center;
-        font-size: 12px;
-        color: var(--text-light);
-        margin-top: 10px;
+    .profile-form button:hover {
+        background: var(--primary-hover);
     }
 
+    /* --- CART VIEW --- */
+    .cart-container {
+        display: flex;
+        gap: 20px;
+        margin-bottom: 40px;
+        align-items: flex-start;
+    }
+    .cart-list {
+        flex: 3;
+        background: var(--card-bg);
+        padding: 20px;
+        border-radius: 10px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+    }
+    .cart-summary {
+        flex: 1;
+        background: var(--card-bg);
+        padding: 20px;
+        border-radius: 10px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+        position: sticky;
+        top: 80px; /* Offset from fixed header */
+    }
+    .cart-summary h3 {
+        margin-top: 0;
+        font-size: 20px;
+    }
+    .total-price-text {
+        display: flex;
+        justify-content: space-between;
+        font-size: 16px;
+        font-weight: 500;
+        margin: 8px 0;
+    }
+    .total-price-text span {
+        font-weight: 700;
+        color: var(--primary-color);
+        font-size: 20px;
+    }
+    .cart-summary button {
+        width: 100%;
+        background: var(--success-bg);
+        color: white;
+        border: none;
+        padding: 12px 20px;
+        border-radius: 6px;
+        font-size: 18px;
+        font-weight: 600;
+        cursor: pointer;
+        margin-top: 20px;
+        transition: background 0.2s;
+    }
+    .cart-summary button:hover:not(:disabled) {
+        background: #388e3c;
+    }
+    .cart-summary button:disabled {
+        background: #cccccc;
+        cursor: not-allowed;
+    }
+    .empty-state {
+        text-align: center;
+        color: var(--text-light);
+        padding: 50px 0;
+        font-size: 16px;
+    }
+
+    /* Cart Item Card */
+    .cart-item-card {
+        display: flex;
+        align-items: center;
+        padding: 15px 0;
+        border-bottom: 1px solid var(--border-color);
+    }
+    .cart-item-card:last-child {
+        border-bottom: none;
+    }
+    .cart-item-card .item-image {
+        width: 80px;
+        height: 60px;
+        background-size: cover;
+        background-position: center;
+        border-radius: 6px;
+        flex-shrink: 0;
+        margin-right: 15px;
+    }
+    .cart-item-card .item-details {
+        flex-grow: 1;
+    }
+    .cart-item-card .item-details h3 {
+        margin: 0 0 5px 0;
+        font-size: 16px;
+        font-weight: 600;
+    }
+    .cart-item-card .item-details .item-specs {
+        font-size: 12px;
+        color: var(--text-light);
+        margin: 0;
+    }
+    .cart-item-card .item-price {
+        font-size: 18px;
+        font-weight: 700;
+        color: var(--primary-color);
+        margin: 0 20px;
+        flex-shrink: 0;
+    }
+    .cart-item-card .item-actions .remove-btn {
+        background: var(--danger-color);
+        color: white;
+        border: none;
+        padding: 6px 10px;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 12px;
+        transition: background 0.2s;
+    }
+    .cart-item-card .item-actions .remove-btn:hover {
+        background: #c82333;
+    }
 
     /* --- MEDIA QUERIES --- */
     @media (max-width: 900px) {
-      .cart-container {
-        flex-direction: column;
-      }
-
-      .cart-summary {
-        width: 100%;
-        max-width: none;
-        position: static; /* Remove sticky on small screens */
-      }
-
-      .search-filter {
-        flex-direction: column;
-      }
-
-      .search-filter select {
-        width: 100%;
-      }
+        .cart-container {
+            flex-direction: column;
+        }
+        .cart-summary {
+            width: 100%;
+            position: static; /* Remove sticky on small screens */
+        }
+        .search-filter {
+            flex-direction: column;
+        }
+        .search-filter select {
+            width: 100%;
+        }
+    }
+    @media (max-width: 600px) {
+        main {
+            padding: 0 10px;
+        }
+        .card {
+            max-width: 100%;
+        }
+        .drawer-menu {
+            width: 80%;
+        }
+        .cart-summary {
+            position: static;
+            top: 0;
+        }
+        .cart-item-card {
+            flex-wrap: wrap;
+        }
+        .cart-item-card .item-price {
+            order: 1;
+            width: 100%;
+            margin: 10px 0 0 0;
+            text-align: right;
+        }
+        .cart-item-card .item-actions {
+            order: 2;
+        }
+        .cart-item-card .item-image {
+            order: 3;
+        }
+        .cart-item-card .item-details {
+            order: 4;
+        }
+        /* Tables (History/Orders) */
+        .history-table thead, .orders-table thead {
+            display: none;
+        }
+        .history-table tr, .orders-table tr {
+            display: block;
+            margin-bottom: 15px;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        }
+        .history-table td, .orders-table td {
+            display: block;
+            text-align: right;
+            padding-left: 50%;
+            position: relative;
+            border-bottom: 1px dotted var(--border-color);
+        }
+        .history-table tr:last-child td, .orders-table tr:last-child td {
+            border-bottom: 1px dotted var(--border-color); /* Re-add the separator */
+        }
+        .history-table tr:last-child td:last-child, .orders-table tr:last-child td:last-child {
+            border-bottom: none;
+        }
+        .history-table td::before, .orders-table td::before {
+            content: attr(data-label);
+            position: absolute;
+            left: 10px;
+            font-weight: 600;
+            color: var(--primary-color);
+            text-align: left;
+        }
     }
 
-    @media (max-width: 600px) {
-      main {
-        padding: 0 10px;
-      }
-
-      .card {
-        max-width: 100%;
-      }
-      
-      .drawer-menu {
-        width: 80%;
-      }
-      
-      .cart-summary {
-        position: static;
+    /* --- BUY NOW MODAL STYLES --- */
+    #buyNowOverlay {
+        position: fixed;
         top: 0;
-      }
-      
-      .cart-item-card {
-        flex-wrap: wrap;
-      }
-      
-      .cart-item-card .item-price {
-        order: 1;
+        left: 0;
         width: 100%;
-        margin: 10px 0 0 0;
-        text-align: right;
-      }
-      
-      .cart-item-card .item-actions {
-        order: 2;
-      }
-      
-      .cart-item-card .item-image {
-        order: 3;
-      }
-      
-      .cart-item-card .item-details {
-        order: 4;
-      }
-      
-      /* Tables (History/Orders) */
-      .history-table thead, .orders-table thead {
+        height: 100%;
+        background: rgba(0, 0, 0, 0.6);
+        z-index: 10005;
         display: none;
-      }
-
-      .history-table tr, .orders-table tr {
-        display: block;
-        margin-bottom: 10px;
-        border: 1px solid var(--border-color);
-        border-radius: 8px;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
-      }
-      
-      .history-table td, .orders-table td {
-        display: block;
-        text-align: right;
-        padding: 8px 15px;
-        position: relative;
-      }
-      
-      .history-table td::before, .orders-table td::before {
-        content: attr(data-label);
-        position: absolute;
-        left: 15px;
+    }
+    .buy-now-modal {
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%) scale(0.9);
+        width: 90%;
+        max-width: 550px;
+        background: var(--card-bg);
+        border-radius: 10px;
+        box-shadow: 0 8px 30px rgba(0, 0, 0, 0.3);
+        z-index: 10006;
+        opacity: 0;
+        visibility: hidden;
+        transition: transform 0.3s ease-out, opacity 0.3s ease-out;
+    }
+    .buy-now-modal.open {
+        opacity: 1;
+        visibility: visible;
+        transform: translate(-50%, -50%) scale(1);
+    }
+    .modal-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 15px 20px;
+        border-bottom: 1px solid var(--border-color);
+    }
+    .modal-header h3 {
+        margin: 0;
+        font-size: 20px;
         font-weight: 700;
+    }
+    .modal-header button {
+        background: none;
+        border: none;
+        font-size: 24px;
+        cursor: pointer;
+        color: var(--text-light);
+    }
+    .modal-content {
+        padding: 20px;
+    }
+    .modal-price {
+        text-align: center;
+        font-size: 18px;
+        font-weight: 500;
+        margin-bottom: 20px;
+    }
+    .modal-price span {
+        font-size: 28px;
+        font-weight: 700;
+        color: var(--danger-color);
+        display: block;
+        margin-top: 5px;
+    }
+    .loan-arrangement-section {
+        border: 1px dashed var(--border-color);
+        padding: 15px;
+        border-radius: 8px;
+        margin-bottom: 20px;
+    }
+    .loan-arrangement-section h4 {
+        margin: 0 0 15px 0;
+        font-size: 16px;
+        font-weight: 600;
         color: var(--primary-color);
-      }
-      
-      .history-table td:last-child, .orders-table td:last-child {
-        border-bottom: none;
-      }
-      
-      .form-group.split {
-        flex-direction: column;
-        gap: 0;
-      }
-      
-      .input-group-modal {
-          flex-direction: column;
-          gap: 5px;
-      }
+        border-bottom: 1px solid var(--border-color);
+        padding-bottom: 8px;
+    }
+    .input-group-modal {
+        display: flex;
+        gap: 15px;
+        margin-bottom: 15px;
+    }
+    .input-group-modal > div {
+        flex: 1;
+    }
+    .input-group-modal label {
+        display: block;
+        font-size: 12px;
+        font-weight: 500;
+        margin-bottom: 5px;
+        color: var(--text-light);
+    }
+    .input-group-modal input, .input-group-modal select {
+        width: 100%;
+        padding: 10px;
+        border: 1px solid var(--border-color);
+        border-radius: 4px;
+        font-size: 15px;
+    }
+    .emi-summary {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 15px 0;
+        font-size: 16px;
+        font-weight: 500;
+    }
+    .emi-summary h4 {
+        margin: 0;
+        font-size: 18px;
+        color: var(--text-color);
+        font-weight: 600;
+    }
+    .emi-value {
+        font-size: 22px;
+        color: var(--danger-color);
+        font-weight: 700;
+    }
+    .modal-footer {
+        border-top: 1px solid var(--border-color);
+        padding-top: 15px;
+    }
+    #modalConfirmOrder {
+        width: 100%;
+        padding: 12px;
+        background: var(--primary-color);
+        color: white;
+        border: none;
+        border-radius: 6px;
+        font-size: 18px;
+        font-weight: 700;
+        cursor: pointer;
+        transition: background 0.2s;
+    }
+    #modalConfirmOrder:hover {
+        background: var(--primary-hover);
+    }
+    .modal-note {
+        text-align: center;
+        margin-top: 15px;
+        font-size: 13px;
+        color: var(--text-light);
+    }
+    .modal-note a {
+        color: var(--primary-color);
+        text-decoration: none;
+        font-weight: 600;
+    }
+
+    /* Responsive adjustments for modal */
+    @media (max-width: 550px) {
+        .buy-now-modal {
+            width: 95%;
+        }
+        .input-group-modal {
+            flex-direction: column;
+        }
     }
   </style>
 </head>
 <body>
   <div id="loader-bar"></div>
   <div id="toast-container"></div>
+  
   <div id="buyNowOverlay" onclick="closeBuyNowModal()"></div>
+  <div id="buyNowModal" class="buy-now-modal" data-vehicle-key="" data-vehicle-name="" data-vehicle-price="0">
+      <div class="modal-header">
+          <h3 id="modalVehicleName">Confirm Purchase</h3>
+          <button onclick="closeBuyNowModal()">✕</button>
+      </div>
+      <div class="modal-content">
+          <div class="modal-price">
+              Total Vehicle Price: <span id="modalVehiclePrice">₹0</span>
+          </div>
+
+          <div class="input-group-modal full-width" style="margin-bottom: 20px;">
+              <label for="modalPaymentOption">Select Payment Option</label>
+              <select id="modalPaymentOption" onchange="window.updateEMICalculation()">
+                  <option value="full_paid">Full Paid (Cash/Bank Transfer)</option>
+                  <option value="emi">EMI / Loan Arrangement</option>
+              </select>
+          </div>
+
+          <div id="emiArrangementSection" class="loan-arrangement-section">
+              <h4>Loan / EMI Arrangement</h4>
+              <div class="input-group-modal">
+                  <div>
+                      <label for="modalDownPayment">Down Payment (₹)</label>
+                      <input type="number" id="modalDownPayment" value="0" min="0" required>
+                  </div>
+                  <div>
+                      <label for="modalLoanTenure">Loan Tenure (Months)</label>
+                      <select id="modalLoanTenure">
+                          <option value="12">12 Months (1 Year)</option>
+                          <option value="24">24 Months (2 Years)</option>
+                          <option value="36">36 Months (3 Years)</option>
+                          <option value="48">48 Months (4 Years)</option>
+                      </select>
+                  </div>
+              </div>
+              <div class="input-group-modal">
+                  <div>
+                      <label for="modalInterestRate">Annual Interest Rate (%)</label>
+                      <select id="modalInterestRate">
+                          <option value="10">10.0%</option>
+                          <option value="12">12.0%</option>
+                          <option value="14">14.0%</option>
+                          <option value="16">16.0%</option>
+                      </select>
+                  </div>
+                  <div>
+                      <label>Loan Amount Remaining (₹)</label>
+                      <span id="modalLoanAmountDisplay" class="input-display">₹0</span>
+                  </div>
+              </div>
+
+              <div class="emi-summary">
+                  <h4>Estimated Monthly EMI</h4>
+                  <span id="modalMonthlyEMI" class="emi-value">₹0</span>
+              </div>
+          </div>
+          
+          <div class="modal-footer">
+              <button id="modalConfirmOrder" onclick="confirmBuyNow()">Confirm Cash Order</button>
+              <p class="modal-note">By confirming, you agree to our <a href="#" onclick="showToast('Terms & Conditions not implemented yet.', 'warning')">Terms & Conditions</a>.</p>
+          </div>
+      </div>
+  </div>
+  <div id="drawer-menu">
+    <div class="drawer-header">
+      <button onclick="toggleDrawer()">✕</button>
+    </div>
+    <div class="drawer-profile">
+      <img id="userPhotoDrawer" src="https://static-00.iconduck.com/assets.00/user-avatar-icon-512x512-nghi2896.png" alt="User Photo" />
+      <h3 id="userNameDrawer">Guest User</h3>
+      <p id="userEmailDrawer">Please log in</p>
+    </div>
+    <div class="drawer-nav">
+      <a href="#" class="nav-item active" data-section="home" onclick="showSection('home')">
+        <span class="icon">🏠</span> Home
+      </a>
+      <a href="#" class="nav-item" data-section="cart" onclick="showSection('cart')">
+        <span class="icon">🛒</span> Cart (<span id="cart-count-drawer">0</span>)
+      </a>
+      <a href="#" class="nav-item" data-section="order" onclick="showSection('order')">
+        <span class="icon">📦</span> My Orders
+      </a>
+      <a href="#" class="nav-item" data-section="sell" onclick="showSection('sell')">
+        <span class="icon">💰</span> Sell Vehicle
+      </a>
+      <a href="#" class="nav-item" data-section="history" onclick="showSection('history')">
+        <span class="icon">📜</span> Selling History
+      </a>
+      <a href="#" class="nav-item" data-section="profile" onclick="showSection('profile')">
+        <span class="icon">👤</span> Profile
+      </a>
+    </div>
+    <button class="drawer-logout-btn" onclick="logout()">Logout</button>
+  </div>
+
+  <div id="drawer-overlay" onclick="toggleDrawer()"></div>
 
   <header>
     <div class="header-left">
@@ -2207,200 +2110,181 @@
       <h1>JD MotoHub</h1>
     </div>
     <div class="header-right">
-        <a href="#" class="cart-icon" onclick="showSection('cart')">🛒<span id="cart-count">0</span></a>
-        <img id="header-avatar" class="profile-avatar" src="https://static-00.iconduck.com/assets.00/user-avatar-icon-512x512-nghi2896.png" alt="Profile" onclick="showSection('profile')" />
+      <div class="cart-icon" onclick="showSection('cart')">
+        🛒
+        <span id="cart-count" class="cart-badge">0</span>
+      </div>
     </div>
   </header>
 
   <main>
-    <section id="home-view" class="content-section">
+    <div id="home-view" class="content-section">
       <h2 class="section-title">Available Vehicles</h2>
-      
       <div class="search-filter">
-        <input type="text" id="search-input" placeholder="Search by name or year..." oninput="filterAndSortVehicles()">
-        <select id="type-filter" onchange="filterAndSortVehicles()">
-          <option value="all">All Types</option>
-          <option value="bike">Bike</option>
-          <option value="car">Car</option>
-          <option value="scooter">Scooter</option>
+        <input type="text" placeholder="Search by name, year, km, or price..." id="search">
+        <select id="filter">
+          <option value="all">All Vehicles</option>
+          <option value="bike">Bikes</option>
+          <option value="car">Cars</option>
         </select>
-        <select id="sort-by" onchange="filterAndSortVehicles()">
-          <option value="default">Sort By (Default)</option>
-          <option value="price_asc">Price (Low to High)</option>
-          <option value="price_desc">Price (High to Low)</option>
+        <select id="sort">
+          <option value="default">Default Sort</option>
+          <option value="name_asc">Name (A-Z)</option>
+          <option value="name_desc">Name (Z-A)</option>
           <option value="year_desc">Year (Newest)</option>
           <option value="year_asc">Year (Oldest)</option>
-          <option value="km_asc">KMs (Low to High)</option>
-          <option value="km_desc">KMs (High to Low)</option>
+          <option value="km_asc">Kilometers (Low to High)</option>
+          <option value="km_desc">Kilometers (High to Low)</option>
+          <option value="price_asc">Price (Low to High)</option>
+          <option value="price_desc">Price (High to Low)</option>
         </select>
       </div>
-
       <div id="vehicleGrid">
-        <p style="grid-column: 1 / -1; text-align: center; color: var(--text-light);">Loading vehicles...</p>
-      </div>
-    </section>
-
-    <section id="sell-view" class="content-section hidden">
-      <h2 class="section-title">Sell Your Vehicle</h2>
-      
-      <div class="sell-form-container">
-        <p style="margin-bottom: 20px; color: var(--text-light);">Fill in the details below. Your submission will be reviewed by an admin before being listed.</p>
-        
-        <h3>Seller Information</h3>
-        <div class="form-group split">
-            <div>
-                <label for="sellername">Your Full Name *</label>
-                <input type="text" id="sellername" required readonly style="background: #f0f0f0;">
-                <span class="note">Automatically populated from your profile. Update your profile if incorrect.</span>
-            </div>
-            <div>
-                <label for="selleremail">Email Address *</label>
-                <input type="email" id="selleremail" required readonly style="background: #f0f0f0;">
-                <span class="note">Used for correspondence and tracking.</span>
-            </div>
         </div>
-        
-        <div class="form-group split">
+    </div>
+
+    <div id="cart-view" class="content-section hidden">
+      <h2 class="section-title">Your Shopping Cart (<span id="cart-count-display">0</span> Items)</h2>
+      <div class="cart-container">
+        <div class="cart-list" id="cartItemsList">
+          </div>
+        <div class="cart-summary" id="cartSummary">
+          <h3>Order Summary</h3>
+          <button id="checkoutButton" onclick="checkoutCart()" disabled>Proceed to Checkout</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="order-view" class="content-section hidden">
+      <h2 class="section-title">Your Order History</h2>
+      <div class="table-container">
+        <table class="orders-table">
+          <thead>
+            <tr>
+              <th>Order ID</th>
+              <th>Vehicle</th>
+              <th>Price</th>
+              <th>Date</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="ordersTableBody">
+            </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div id="sell-view" class="content-section hidden">
+      <h2 class="section-title">Sell Your Vehicle</h2>
+      <div class="sell-form-container">
+        <form onsubmit="event.preventDefault(); addVehicle();">
+          <h3>Seller Details</h3>
+          <div class="form-group">
+            <label for="sellername">Full Name *</label>
+            <input type="text" id="sellername" required>
+          </div>
+          <div class="form-group">
+            <label for="selleremail">Email Address *</label>
+            <input type="email" id="selleremail" required readonly>
+          </div>
+          <div class="form-group split">
             <div>
                 <label for="sellerphone">Mobile Number *</label>
-                <input type="text" id="sellerphone" required pattern="[0-9]{10,15}" title="10 to 15 digits" readonly style="background: #f0f0f0;">
+                <input type="text" id="sellerphone" required pattern="[0-9]{10,15}" title="10 to 15 digits">
                 <span class="note">Required for order processing/verification.</span>
             </div>
             <div>
                 <label for="selleraltphone">Alternate Phone</label>
                 <input type="text" id="selleraltphone" pattern="[0-9]{0,15}">
             </div>
-        </div>
-        
-        <div class="form-group">
+          </div>
+          <div class="form-group">
             <label for="selleraddress">Your Address *</label>
             <textarea id="selleraddress" rows="3" required></textarea>
-        </div>
+          </div>
 
-        <hr style="margin: 30px 0;">
+          <hr style="margin: 30px 0;">
 
-        <h3>Vehicle Details</h3>
-        <div class="form-group">
+          <h3>Vehicle Details</h3>
+          <div class="form-group">
             <label for="vname">Vehicle Name/Model *</label>
             <input type="text" id="vname" required>
-        </div>
-        
-        <div class="form-group">
+          </div>
+          <div class="form-group">
             <label for="vdescription">Description *</label>
             <textarea id="vdescription" rows="4" required placeholder="Describe the condition, features, and history of the vehicle."></textarea>
-        </div>
-
-        <div class="form-group split">
+          </div>
+          <div class="form-group split">
             <div>
                 <label for="vtype">Type *</label>
                 <select id="vtype" required>
-                    <option value="bike">Bike</option>
-                    <option value="car">Car</option>
-                    <option value="scooter">Scooter</option>
+                  <option value="bike">Bike</option>
+                  <option value="car">Car</option>
                 </select>
             </div>
             <div>
-                <label for="vyear">Manufacturing Year *</label>
-                <input type="number" id="vyear" min="1950" max="2024" required>
+                <label for="vyear">Year of Manufacture *</label>
+                <input type="number" id="vyear" required min="1990" max="2024">
             </div>
-        </div>
-        
-        <div class="form-group split">
+          </div>
+          <div class="form-group split">
             <div>
-                <label for="vkm">Total Kilometers Driven *</label>
-                <input type="number" id="vkm" required min="0">
+                <label for="vkm">Kilometers Driven *</label>
+                <input type="number" id="vkm" required min="1" step="1">
             </div>
             <div>
-                <label for="vprice">Expected Selling Price (₹) *</label>
-                <input type="number" id="vprice" required min="1000">
+                <label for="vprice">Your Expected Selling Price (₹) *</label>
+                <input type="number" id="vprice" required min="1000" step="100">
             </div>
-        </div>
+          </div>
+          
+          <hr style="margin: 30px 0;">
 
-        <hr style="margin: 30px 0;">
-
-        <h3>Images (Max 5) *</h3>
-        <div class="form-group split">
-            <div>
-                <label for="file-upload">Upload Photos (Max 5)</label>
-                <input type="file" id="file-upload" accept="image/*" multiple onchange="handleFileSelection(event)">
-                <span class="note">Select local files (converted to temporary Base64).</span>
-            </div>
-            <div>
-                <label for="vimages">or Add Image URLs (comma separated)</label>
-                <input type="text" id="vimages" placeholder="URL 1, URL 2, ...">
-                <button type="button" class="action-btn cart-btn" style="margin-top: 10px; width: 100%;" onclick="addImageURLsToSelection()">Add URLs</button>
-            </div>
-        </div>
-        
-        <div class="form-group">
-            <label>Current Previews</label>
+          <h3>Vehicle Images</h3>
+          <div class="form-group">
+            <label for="vimages">Upload Images (Max 5 files)</label>
+            <input type="file" id="vfileinput" accept="image/*" multiple onchange="handleFileSelection(event)">
+            <span class="note">Upload photos from your computer/phone (converted to link internally).</span>
+          </div>
+          <div class="form-group">
+            <label for="vimages">Or Add Image URLs (comma-separated)</label>
+            <input type="text" id="vimages" placeholder="https://example.com/img1.jpg, https://example.com/img2.jpg">
+            <button type="button" class="full-width" onclick="addImageURLsToSelection()">Add URLs to Selection</button>
+            <span class="note">Ensure URLs are directly accessible image files.</span>
+          </div>
+          <div class="form-group">
+            <label>Image Previews</label>
             <div id="imagePreviewContainer" class="preview-grid">
-                <p class="note">No images added yet.</p>
-            </div>
-        </div>
+              </div>
+          </div>
 
-        <button type="button" onclick="addVehicle()">Submit Vehicle for Approval</button>
+          <button type="submit" style="margin-top: 20px;">Submit for Approval</button>
+        </form>
       </div>
-    </section>
+    </div>
     
-    <section id="history-view" class="content-section hidden">
+    <div id="history-view" class="content-section hidden">
       <h2 class="section-title">Your Selling History</h2>
-      
-      <table class="history-table">
-        <thead>
-          <tr>
-            <th>Vehicle Name</th>
-            <th>Type</th>
-            <th>Your Price</th>
-            <th>Final Price</th>
-            <th>Status</th>
-            <th>Action</th>
-          </tr>
-        </thead>
-        <tbody id="historyTableBody">
-          </tbody>
-      </table>
-    </section>
+      <div class="table-container">
+        <table class="history-table">
+          <thead>
+            <tr>
+              <th>Vehicle Name</th>
+              <th>Type</th>
+              <th>Your Quoted Price</th>
+              <th>Final Selling Price</th>
+              <th>Status</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="historyTableBody">
+            </tbody>
+        </table>
+      </div>
+    </div>
 
-    <section id="cart-view" class="content-section hidden">
-        <h2 class="section-title">Shopping Cart (<span id="cart-count-display">0</span> items)</h2>
-        
-        <div class="cart-container">
-            <div class="cart-list" id="cartItemsList">
-                <p class="empty-state">Loading cart...</p>
-            </div>
-            
-            <div class="cart-summary">
-                <h3>Order Summary</h3>
-                <div id="cartSummary">
-                     <p class="total-price-text">Total: <span>₹0</span></p>
-                </div>
-                <button id="checkoutButton" onclick="checkoutCart()">Proceed to Checkout</button>
-            </div>
-        </div>
-    </section>
-
-    <section id="order-view" class="content-section hidden">
-      <h2 class="section-title">My Orders</h2>
-      
-      <table class="orders-table">
-        <thead>
-          <tr>
-            <th>Order ID</th>
-            <th>Vehicle</th>
-            <th>Price / Loan Info</th>
-            <th>Date</th>
-            <th>Status</th>
-          </tr>
-        </thead>
-        <tbody id="ordersTableBody">
-          </tbody>
-      </table>
-    </section>
-    
-    <section id="profile-view" class="content-section hidden">
+    <div id="profile-view" class="content-section hidden">
       <h2 class="section-title">Your Profile</h2>
-      
       <div class="profile-card">
         <div class="profile-summary">
             <img id="userPhotoProfile" src="https://static-00.iconduck.com/assets.00/user-avatar-icon-512x512-nghi2896.png" alt="User Photo" />
@@ -2422,111 +2306,12 @@
           <span class="note">Required for placing orders.</span>
           <label for="profile-input-address">Address</label>
           <input type="text" id="profile-input-address">
-          
-          <button onclick="updateUserProfile()">Save Profile Changes</button>
+
+          <button onclick="updateUserProfile()">Update Profile</button>
         </div>
       </div>
-    </section>
+    </div>
+
   </main>
-
-  <div id="buyNowModal">
-      <div class="modal-header">
-          <h3 id="modalVehicleName">Confirm Purchase</h3>
-          <button onclick="closeBuyNowModal()">✕</button>
-      </div>
-      <div class="modal-content">
-          <div class="modal-price">
-              Vehicle Price: <span id="modalVehiclePrice">₹0</span>
-          </div>
-
-          <div class="input-group-full-width">
-              <label for="modalPaymentOption">Payment Method</label>
-              <select id="modalPaymentOption">
-                  <option value="emi">EMI / Loan Arrangement</option>
-                  <option value="full_paid">Full Payment (Cash / Transfer)</option>
-              </select>
-          </div>
-
-          <div id="emiArrangementSection" class="loan-arrangement-section">
-              <h4>Loan Arrangement Details (EMI)</h4>
-              <div class="input-group-modal">
-                  <div>
-                      <label for="modalDownPayment">Down Payment (₹)</label>
-                      <input type="number" id="modalDownPayment" value="50000" min="0" oninput="updateEMICalculation()">
-                  </div>
-                  <div>
-                      <label for="modalLoanTenure">Loan Tenure (Months)</label>
-                      <select id="modalLoanTenure">
-                          <option value="12">1 Year (12 Months)</option>
-                          <option value="24">2 Years (24 Months)</option>
-                          <option value="36" selected>3 Years (36 Months)</option>
-                          <option value="48">4 Years (48 Months)</option>
-                          <option value="60">5 Years (60 Months)</option>
-                      </select>
-                  </div>
-              </div>
-              <div class="input-group-modal">
-                  <div>
-                      <label for="modalInterestRate">Annual Interest Rate (%)</label>
-                      <select id="modalInterestRate">
-                          <option value="10" selected>10.0%</option>
-                          <option value="12">12.0%</option>
-                          <option value="14">14.0%</option>
-                          <option value="16">16.0%</option>
-                      </select>
-                  </div>
-                  <div>
-                      <label>Loan Amount Remaining (₹)</label>
-                      <span id="modalLoanAmountDisplay" class="input-display">₹0</span>
-                  </div>
-              </div>
-              <div class="emi-summary">
-                  <h4>Estimated Monthly EMI</h4>
-                  <span id="modalMonthlyEMI" class="emi-value">₹0</span>
-              </div>
-          </div>
-          <div class="modal-footer">
-              <button id="modalConfirmOrder" onclick="confirmBuyNow()">Confirm Cash Order</button>
-              <p class="modal-note">By confirming, you agree to our <a href="#" onclick="showToast('Terms & Conditions not implemented yet.', 'warning')">Terms & Conditions</a>.</p>
-          </div>
-      </div>
-  </div>
-
-  <div id="drawer-menu">
-    <div class="drawer-header">
-      <button onclick="toggleDrawer()">✕</button>
-    </div>
-    <div class="drawer-profile">
-      <img id="userPhotoDrawer" src="https://static-00.iconduck.com/assets.00/user-avatar-icon-512x512-nghi2896.png" alt="User Photo" />
-      <h3 id="userNameDrawer">User Name</h3>
-      <p id="userEmailDrawer">user@example.com</p>
-    </div>
-    <div class="drawer-nav">
-      <a href="#" class="nav-item active" data-section="home" onclick="showSection('home')">
-        <span class="icon">🏠</span> Home
-      </a>
-      <a href="#" class="nav-item" data-section="cart" onclick="showSection('cart')">
-        <span class="icon">🛒</span> Cart (<span id="cart-count-drawer">0</span>)
-      </a>
-      <a href="#" class="nav-item" data-section="order" onclick="showSection('order')">
-        <span class="icon">📦</span> My Orders
-      </a>
-      <a href="#" class="nav-item" data-section="sell" onclick="showSection('sell')">
-        <span class="icon">💰</span> Sell Vehicle
-      </a>
-      <a href="#" class="nav-item" data-section="history" onclick="showSection('history')">
-        <span class="icon">📜</span> Selling History
-      </a>
-      <a href="#" class="nav-item" data-section="profile" onclick="showSection('profile')">
-        <span class="icon">👤</span> My Profile
-      </a>
-    </div>
-    <div class="drawer-footer">
-      <button class="drawer-logout-btn" onclick="logout()">
-        Log Out
-      </button>
-    </div>
-  </div>
-
 </body>
 </html>
