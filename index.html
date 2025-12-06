@@ -208,9 +208,8 @@
       background: linear-gradient(to top, var(--bg-card), transparent);
     }
     .card-content { padding: 20px; flex-grow: 1; display: flex; flex-direction: column; }
-    .card h3 { font-size: 20px; margin-bottom: 8px; color: var(--text-main); font-family: 'Inter', sans-serif; font-weight: 700; cursor: pointer; transition:0.3s; }
+    .card h3 { font-size: 20px; margin-bottom: 8px; color: var(--text-main); font-family: 'Inter', sans-serif; font-weight: 700; cursor:pointer; }
     .card h3:hover { color: var(--primary); }
-    
     .card-specs {
       font-size: 13px; color: var(--primary); text-transform: uppercase;
       letter-spacing: 1px; margin-bottom: 12px; font-weight: 600;
@@ -240,7 +239,7 @@
     .btn-primary:hover { background: var(--primary-hover); transform: translateY(-2px); }
     .btn-danger { background: var(--danger); color: white; }
 
-    /* --- CART & ORDERS --- */
+    /* --- CART & ORDERS LISTS --- */
     .cart-container { display: flex; gap: 30px; flex-wrap: wrap; }
     .cart-list { flex: 2; display: flex; flex-direction: column; gap: 15px; min-width: 300px; }
     .cart-summary, .profile-card, .sell-form-container {
@@ -249,12 +248,13 @@
       height: fit-content;
     }
     
+    /* Horizontal Card Item */
     .cart-item-card {
       display: flex; background: rgba(30, 41, 59, 0.5); border-radius: 12px;
       padding: 15px; align-items: center; border: 1px solid var(--border-color);
     }
     .cart-item-card .item-image {
-      width: 100px; height: 75px; border-radius: 8px;
+      width: 100px; height: 75px; border-radius: 8px; flex-shrink: 0;
       background-size: cover; background-position: center; margin-right: 20px;
     }
     .cart-item-card .item-info { flex-grow: 1; }
@@ -276,7 +276,7 @@
     .status-badge.pending { background: rgba(245, 158, 11, 0.1); color: var(--warning); border: 1px solid var(--warning); }
     .status-badge.rejected { background: rgba(239, 68, 68, 0.1); color: var(--danger); border: 1px solid var(--danger); }
 
-    /* --- FORMS --- */
+    /* --- FORMS (Sell/Profile) --- */
     .sell-form-container { max-width: 700px; margin: 0 auto; }
     .form-group { margin-bottom: 20px; }
     .form-group label { display: block; margin-bottom: 8px; font-size: 13px; color: var(--primary); font-weight: 600; }
@@ -284,6 +284,7 @@
     .form-row > div { flex: 1; }
     .full-width-btn { width: 100%; margin-top: 10px; padding: 15px; font-size: 16px; }
 
+    /* Image Preview */
     .preview-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(80px, 1fr)); gap: 10px; margin-top: 10px; }
     .preview-wrapper {
       position: relative; height: 80px; border-radius: 8px; overflow: hidden;
@@ -295,7 +296,7 @@
       color: white; border: none; cursor: pointer; border-radius: 50%; width: 20px; height: 20px; display: flex; align-items: center; justify-content: center;
     }
 
-    /* --- MODALS --- */
+    /* --- MODALS (General) --- */
     .modal-overlay {
       position: fixed; top: 0; left: 0; width: 100%; height: 100%;
       background: rgba(0,0,0,0.8); backdrop-filter: blur(5px);
@@ -326,10 +327,10 @@
     }
     .emi-amount { font-size: 24px; color: var(--primary); font-weight: 700; }
 
-    /* --- DETAILS MODAL CUSTOMIZATION --- */
+    /* --- DETAILS MODAL (Custom Width & Layout) --- */
     .details-modal-width { max-width: 900px !important; width: 95% !important; }
     .detail-grid { display: flex; gap: 30px; }
-    .carousel-section { flex: 1.3; }
+    .carousel-section { flex: 1.2; }
     .info-section { flex: 1; display: flex; flex-direction: column; }
     
     /* Carousel */
@@ -340,16 +341,9 @@
     }
     .carousel-main img { width: 100%; height: 100%; object-fit: contain; }
     
-    .thumbnails-row { 
-        display: flex; gap: 10px; overflow-x: auto; padding-bottom: 5px; 
-        /* Custom Scrollbar for chrome/safari */
-        scrollbar-width: thin; scrollbar-color: var(--primary) var(--bg-card);
-    }
-    .thumbnails-row::-webkit-scrollbar { height: 6px; }
-    .thumbnails-row::-webkit-scrollbar-thumb { background-color: var(--primary); border-radius: 3px; }
-
+    .thumbnails-row { display: flex; gap: 10px; overflow-x: auto; padding-bottom: 5px; }
     .thumb-img {
-        width: 80px; height: 60px; border-radius: 6px; cursor: pointer; flex-shrink: 0;
+        width: 70px; height: 50px; border-radius: 6px; cursor: pointer; flex-shrink: 0;
         object-fit: cover; border: 2px solid transparent; opacity: 0.6; transition: 0.3s;
     }
     .thumb-img:hover { opacity: 1; }
@@ -384,7 +378,7 @@
     import { getDatabase, ref, push, onValue, set, query, orderByChild, equalTo, get } 
       from "https://www.gstatic.com/firebasejs/10.12.3/firebase-database.js"; 
 
-    // 🔹 Firebase Config (User Provided)
+    // 🔹 Firebase Config
     const firebaseConfig = {
       apiKey: "AIzaSyBuTQZ0zwLMLdfzzD2KjEhaGk6BTzJK72s",
       authDomain: "secondhand-803a3.firebaseapp.com",
@@ -541,7 +535,7 @@
         modal.dataset.vehiclePrice = vehicleData.price;
 
         window.updateEMICalculation(); 
-        overlay.style.display = 'flex'; 
+        overlay.style.display = 'flex'; // Flex for centering
         setTimeout(() => modal.classList.add('open'), 10);
         document.body.style.overflow = 'hidden'; 
     }
@@ -607,16 +601,15 @@
         window.placeOrderFromModal(key, name, price, paymentMethod, downPayment, loanTenure, interestRate, loanAmount);
     }
 
-    // 🔍 VIEW DETAILS MODAL LOGIC (FIXED)
+    // 🔍 VIEW DETAILS MODAL LOGIC
     window.openDetailsModal = (vehicleKey) => {
-        console.log("Opening details for:", vehicleKey); // Debugging
         const modal = document.getElementById('detailsModal');
         const overlay = document.getElementById('detailsOverlay');
         showLoader();
 
         onValue(ref(db, `vehicles/${vehicleKey}`), (snapshot) => {
             const v = snapshot.val();
-            if(!v) { hideLoader(); console.error("Vehicle not found"); return; }
+            if(!v) { hideLoader(); return; }
 
             const displayPrice = v.adminPrice || v.price || 0;
             
@@ -633,16 +626,13 @@
             const thumbContainer = document.getElementById('detailThumbnails');
             let images = [];
             
-            // Handle image logic robustly
             if (v.vimages) {
                 images = v.vimages.split(',').filter(url => url.trim() !== '');
             } 
             if (images.length === 0 && v.img) {
                 images = [v.img];
             }
-            if (images.length === 0) {
-                 images = ["https://via.placeholder.com/600x400?text=No+Image"];
-            }
+            if (images.length === 0) images = ["https://via.placeholder.com/600x400?text=No+Image"];
 
             // Set Main Image
             mainImg.src = images[0];
@@ -697,16 +687,16 @@
         } catch (err) { showToast(err.message, "error"); } finally { hideLoader(); }
     }
 
-    // 🛒 Load Cart Items
+    // 🛒 Load Cart Items (UPDATED HTML)
     window.loadCartItems = () => {
         const cartList = document.getElementById("cartItemsList");
         const cartSummary = document.getElementById("cartSummary");
-        cartList.innerHTML = ''; 
+        cartList.innerHTML = '<p style="padding:10px; text-align:center; color:var(--text-muted)">Loading cart...</p>'; 
         let totalCartPrice = 0;
 
         if (!currentUserId) {
             document.getElementById('cart-count-display').innerText = 0;
-            cartList.innerHTML = '<p class="empty-state">Log in to view cart.</p>';
+            cartList.innerHTML = '<p class="empty-state" style="text-align:center; padding:20px;">Log in to view cart.</p>';
             cartSummary.innerHTML = '<p>Total: <span>₹0</span></p>';
             document.getElementById('checkoutButton').disabled = true;
             return;
@@ -716,9 +706,8 @@
             const cartKeys = snapshot.val();
             const itemsInCart = cartKeys ? Object.keys(cartKeys).length : 0;
             document.getElementById('cart-count-display').innerText = itemsInCart;
-            cartList.innerHTML = '';
-            totalCartPrice = 0;
-
+            
+            // Don't clear immediately, wait for data
             if (itemsInCart === 0) {
                 cartList.innerHTML = '<p style="text-align:center; padding:20px;">Your cart is empty.</p>';
                 cartSummary.innerHTML = '<p>Total: <span>₹0</span></p>';
@@ -736,6 +725,9 @@
             }));
 
             const vehicles = (await Promise.all(vehiclePromises)).filter(v => v !== null);
+
+            cartList.innerHTML = ''; // Clear loading
+            totalCartPrice = 0;
 
             vehicles.forEach(v => {
                 const displayPrice = v.adminPrice || v.price || 0;
@@ -764,6 +756,9 @@
                 <div style="display:flex; justify-content:space-between; font-size:20px; font-weight:700; color:var(--primary);">
                    <span>Total</span> <span>₹${totalCartPrice.toLocaleString('en-IN')}</span>
                 </div>`;
+            
+            // Re-attach checkout event
+            document.getElementById('checkoutButton').onclick = () => checkoutCart();
         }); 
     };
 
@@ -773,7 +768,7 @@
         catch (err) { showToast(err.message, "error"); }
     };
 
-    // 📦 Load Orders
+    // 📦 Load Orders (UPDATED HTML)
     window.loadOrdersHistory = () => {
         const ordersTableBody = document.getElementById("ordersTableBody");
         ordersTableBody.innerHTML = '<tr><td colspan="5">Loading...</td></tr>';
@@ -951,7 +946,7 @@
       }).catch(err => showToast(err.message, "error")).finally(() => hideLoader());
     };
 
-    // 🏠 Load Vehicles (Home) - FIXED HTML
+    // 🏠 Load Vehicles (Home) - UPDATED TO INCLUDE 'VIEW DETAILS' BUTTON
     const vehicleGrid = document.getElementById("vehicleGrid");
     onValue(ref(db, "vehicles/"), (snapshot) => {
       vehicleGrid.innerHTML = "";
@@ -967,11 +962,11 @@
           card.dataset.year = v.year; card.dataset.km = v.km; card.dataset.price = displayPrice; 
           
           card.innerHTML = `
-            <div class="card-image" style="background-image: url('${v.img}');" onclick="openDetailsModal('${vehicleKey}')">
+            <div class="card-image" style="background-image: url('${v.img}');" onclick="openDetailsModal('${vehicleKey}')" style="cursor:pointer">
                  <div class="card-price" style="position:absolute; bottom:10px; left:15px; color:white; text-shadow:0 2px 4px rgba(0,0,0,0.8);">₹${parseInt(displayPrice).toLocaleString('en-IN')}</div>
             </div>
             <div class="card-content">
-              <h3 onclick="openDetailsModal('${vehicleKey}')">${v.name}</h3>
+              <h3 style="cursor:pointer" onclick="openDetailsModal('${vehicleKey}')">${v.name}</h3>
               <p class="card-specs"><i class="fa-solid fa-calendar"></i> ${v.year} &nbsp;|&nbsp; <i class="fa-solid fa-gauge"></i> ${v.km} km</p>
               <p class="card-desc">${(v.description || '').substring(0, 60)}...</p>
               <div class="card-footer">
@@ -1013,7 +1008,7 @@
         });
     };
 
-    //⚙️ UI Logic
+    // ⚙️ UI Logic
     window.toggleDrawer = () => {
         const drawer = document.getElementById('drawer-menu');
         const overlay = document.getElementById('drawer-overlay');
